@@ -3,6 +3,7 @@
 This package provides tools for scraping Spring documentation:
 - SpringBrowser: Async Playwright browser with retry and rate limiting
 - SpringDocParser: HTML parsing and Markdown conversion
+- ScraperPipeline: AWS Lambda handler for orchestrated scraping
 - Custom exceptions for error handling
 """
 
@@ -22,6 +23,15 @@ from .parser import (
     SpringDocParser,
     SpringMarkdownConverter,
 )
+from .pipeline import (
+    PipelineConfig,
+    PipelineStatus,
+    S3Client,
+    ScrapeResult,
+    ScrapeTarget,
+    ScraperPipeline,
+    lambda_handler,
+)
 
 __all__ = [
     # Browser
@@ -34,6 +44,14 @@ __all__ = [
     "SpringMarkdownConverter",
     "SPRING_DOC_SELECTORS",
     "LANGUAGE_PATTERNS",
+    # Pipeline
+    "ScraperPipeline",
+    "PipelineConfig",
+    "PipelineStatus",
+    "S3Client",
+    "ScrapeResult",
+    "ScrapeTarget",
+    "lambda_handler",
     # Exceptions
     "ScraperError",
     "NavigationError",
