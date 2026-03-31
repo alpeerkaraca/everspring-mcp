@@ -6,6 +6,8 @@ This module provides the scraping pipeline for AWS Lambda execution:
 - S3Client: Secure S3 client wrapper with IAM authentication
 - ScraperPipeline: Orchestration class for browse → parse → upload
 - lambda_handler: AWS Lambda entry point
+
+Also integrates with discovery module for automatic URL discovery.
 """
 
 from __future__ import annotations
@@ -16,7 +18,7 @@ import logging
 import os
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, ClassVar
+from typing import Any, ClassVar, TYPE_CHECKING
 
 import boto3
 from botocore.exceptions import ClientError, BotoCoreError
@@ -35,6 +37,9 @@ from .exceptions import (
     RateLimitError,
     ScraperError,
 )
+
+if TYPE_CHECKING:
+    from .discovery import DiscoveryResult
 
 logger = logging.getLogger(__name__)
 
@@ -698,6 +703,59 @@ class ScraperPipeline:
         )
         
         return processed_results
+    
+    async def discover_and_scrape(
+        self,
+        entry_url: str,
+        module: SpringModule,
+        version: SpringVersion,
+        content_type: ContentType = ContentType.REFERENCE,
+        concurrency: int = 3,
+    ) -> tuple[DiscoveryResult, list[ScrapeResult]]:
+        """Discover and scrape all documentation pages.
+        
+        Combines discovery and scraping into a single operation:
+        1. Discover all URLs from entry point
+        2. Convert to ScrapeTargets
+        3. Process batch scraping
+        
+        Args:
+            entry_url: Starting URL for discovery
+            module: Spring module
+            version: Spring version
+            content_type: Documentation type for all pages
+            concurrency: Maximum concurrent scrapes
+            
+        Returns:
+            Tuple of (DiscoveryResult, list of ScrapeResult)
+        """
+        from .discovery import SpringDocDiscovery, DiscoveryConfig
+        
+        logger.info(f"Starting discover_and_scrape from: {entry_url}")
+        
+        # Create discovery with same browser config
+        discovery_config = DiscoveryConfig(
+            browser_config=self.config.browser_config,
+            parser_config=self.config.parser_config,
+        )
+        discovery = SpringDocDiscovery(discovery_config)
+        
+        # Run discovery
+        discovery_result = await discovery.discover(entry_url, module, version)
+        
+        if discovery_result.link_count == 0:
+            logger.warning("No links discovered, nothing to scrape")
+            return discovery_result, []
+        
+        logger.info(f"Discovered {discovery_result.link_count} links, starting batch scrape")
+        
+        # Convert to targets
+        targets = discovery_result.to_scrape_targets(content_type)
+        
+        # Run batch scraping
+        scrape_results = await self.process_batch(targets, concurrency)
+        
+        return discovery_result, scrape_results
 
 
 def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
