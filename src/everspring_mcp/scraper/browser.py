@@ -27,7 +27,7 @@ from playwright.async_api import (
 )
 from pydantic import BaseModel, ConfigDict, Field
 
-from .exceptions import (
+from everspring_mcp.scraper.exceptions import (
     BrowserLaunchError,
     ContentExtractionError,
     NavigationError,
@@ -36,7 +36,6 @@ from .exceptions import (
 )
 
 logger = logging.getLogger(__name__)
-
 
 # User agents for rotation - modern browsers on various platforms
 USER_AGENTS: list[str] = [

@@ -26,6 +26,7 @@ from .parser import ParserConfig, SpringDocParser, SPRING_DOC_SELECTORS
 from .exceptions import ContentExtractionError, NavigationError, ScraperError
 from .pipeline import ScrapeTarget
 
+
 logger = logging.getLogger(__name__)
 
 

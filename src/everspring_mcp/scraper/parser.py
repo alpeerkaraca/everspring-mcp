@@ -13,20 +13,22 @@ import logging
 import re
 from typing import ClassVar
 
-from bs4 import BeautifulSoup, NavigableString, Tag
+from bs4 import BeautifulSoup, Tag
+from bs4.element import NavigableString
 from markdownify import MarkdownConverter, markdownify
 from pydantic import BaseModel, ConfigDict, Field
 
-from ..models.base import compute_hash
-from ..models.content import (
+from everspring_mcp.models.base import compute_hash
+from everspring_mcp.models.content import (
     CodeExample,
     CodeLanguage,
     ContentType,
     DocumentSection,
     ScrapedPage,
 )
-from ..models.spring import SpringModule, SpringVersion
-from .exceptions import ContentExtractionError
+from everspring_mcp.models.spring import SpringModule, SpringVersion
+from everspring_mcp.scraper.exceptions import ContentExtractionError
+
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +50,7 @@ SPRING_DOC_SELECTORS: dict[str, list[str]] = {
         "#toc",
         ".nav-toc",
         "nav[role='navigation']",
+        ".nav-list"
     ],
     "main_content": [
         "article.doc",
@@ -129,7 +132,7 @@ class SpringMarkdownConverter(MarkdownConverter):
     Handles Spring-specific elements and preserves code formatting.
     """
     
-    def convert_pre(self, el: Tag, text: str, convert_as_inline: bool) -> str:
+    def convert_pre(self, el: Tag, text: str, convert_as_inline: bool = False, parent_tags: list | None = None) -> str:
         """Convert pre element preserving code language."""
         # Try to detect language from various attributes
         lang = ""
@@ -166,7 +169,7 @@ class SpringMarkdownConverter(MarkdownConverter):
         
         return f"\n```{lang}\n{code.strip()}\n```\n"
     
-    def convert_a(self, el: Tag, text: str, convert_as_inline: bool) -> str:
+    def convert_a(self, el: Tag, text: str, convert_as_inline: bool = False, parent_tags: list | None = None) -> str:
         """Convert anchor with proper link handling."""
         href = el.get("href", "")
         title = el.get("title", "")
@@ -182,7 +185,7 @@ class SpringMarkdownConverter(MarkdownConverter):
             return f'[{text}]({href} "{title}")'
         return f"[{text}]({href})"
     
-    def convert_table(self, el: Tag, text: str, convert_as_inline: bool) -> str:
+    def convert_table(self, el: Tag, text: str, convert_as_inline: bool = False, parent_tags: list | None = None) -> str:
         """Convert table to Markdown table format."""
         rows = el.find_all("tr")
         if not rows:

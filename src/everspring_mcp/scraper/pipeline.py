@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import sys
 import os
 from datetime import datetime, timezone
 from enum import Enum
@@ -25,10 +26,10 @@ from botocore.exceptions import ClientError, BotoCoreError
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from typing import Self
 
-from ..models.base import SHA256Hash, VersionedModel, compute_hash
-from ..models.content import ContentType, ScrapedPage
-from ..models.spring import SpringModule, SpringVersion
-from ..models.sync import S3ObjectRef, SyncManifest, FileEntry
+from everspring_mcp.models.base import SHA256Hash, VersionedModel, compute_hash
+from everspring_mcp.models.content import ContentType, ScrapedPage
+from everspring_mcp.models.spring import SpringModule, SpringVersion
+from everspring_mcp.models.sync import S3ObjectRef, SyncManifest, FileEntry
 from .browser import BrowserConfig, SpringBrowser
 from .parser import ParserConfig, SpringDocParser
 from .exceptions import (
@@ -41,6 +42,7 @@ from .exceptions import (
 if TYPE_CHECKING:
     from .discovery import DiscoveryResult
 
+LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s - %(message)s"
 logger = logging.getLogger(__name__)
 
 
@@ -89,6 +91,44 @@ class ScrapeTarget(VersionedModel):
         default=ContentType.REFERENCE,
         description="Type of documentation",
     )
+    
+    @field_validator("module", mode="before")
+    @classmethod
+    def coerce_module(cls, v: Any) -> SpringModule:
+        """Convert string module name to SpringModule enum."""
+        if isinstance(v, SpringModule):
+            return v
+        if isinstance(v, str):
+            # Try direct value match (e.g., "spring-boot")
+            for member in SpringModule:
+                if member.value == v:
+                    return member
+            # Try name match (e.g., "BOOT")
+            try:
+                return SpringModule[v.upper().replace("-", "_").replace("SPRING_", "")]
+            except KeyError:
+                pass
+            raise ValueError(f"Invalid Spring module: {v}")
+        raise TypeError(f"Expected string or SpringModule, got {type(v)}")
+    
+    @field_validator("content_type", mode="before")
+    @classmethod
+    def coerce_content_type(cls, v: Any) -> ContentType:
+        """Convert string content type to ContentType enum."""
+        if isinstance(v, ContentType):
+            return v
+        if isinstance(v, str):
+            # Try direct value match
+            for member in ContentType:
+                if member.value == v:
+                    return member
+            # Try name match
+            try:
+                return ContentType[v.upper().replace("-", "_")]
+            except KeyError:
+                pass
+            raise ValueError(f"Invalid content type: {v}")
+        raise TypeError(f"Expected string or ContentType, got {type(v)}")
     
     @model_validator(mode="after")
     def validate_version(self) -> Self:
@@ -453,7 +493,8 @@ class S3Client:
             return response.get("Metadata", {}).get("content-hash")
             
         except ClientError as e:
-            if e.response["Error"]["Code"] == "404":
+            error_code = e.response.get("Error", {}).get("Code")
+            if error_code == "404":
                 return None
             logger.error(f"Failed to get object metadata: {e}")
             raise
@@ -511,7 +552,8 @@ class S3Client:
             return SyncManifest.model_validate_json(body)
             
         except ClientError as e:
-            if e.response["Error"]["Code"] == "NoSuchKey":
+            error_code = e.response.get("Error", {}).get("Code")
+            if error_code == "NoSuchKey":
                 return None
             logger.error(f"Failed to download manifest: {e}")
             raise
@@ -765,7 +807,7 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     {
         "targets": [
             {
-                "url": "https://docs.spring.io/spring-boot/...",
+                "url": "https://docs.spring.io/spring-boot/everspring_mcp..",
                 "module": "spring-boot",
                 "major": 4,
                 "minor": 0,
@@ -782,10 +824,10 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
             "processed": 5,
             "results": [
                 {
-                    "url": "...",
+                    "url": "everspring_mcp..",
                     "status": "success",
-                    "s3_key": "...",
-                    "content_hash": "..."
+                    "s3_key": "everspring_mcp..",
+                    "content_hash": "everspring_mcp.."
                 }
             ]
         }
@@ -887,8 +929,12 @@ if __name__ == "__main__":
     import sys
     
     logging.basicConfig(
-        level=logging.DEBUG,
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
+        handlers=[
+            logging.FileHandler("everspring_scraper.log"),
+            logging.StreamHandler(sys.stdout)
+        ]
     )
     
     # Test event
