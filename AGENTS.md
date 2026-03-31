@@ -40,3 +40,10 @@ EverSpring MCP is a specialized RAG (Retrieval-Augmented Generation) system desi
 - When writing **S3 Interaction Logic**: Ensure that all interactions with S3 are secure, efficient, and include proper error handling to manage potential issues with network or permissions.
 - When writing **ChromaDB Logic**: Ensure that vector storage and retrieval are optimized for performance, and that metadata is correctly associated with each vector for effective filtering.
 - When writing **Terraform Scripts**: Follow best practices for infrastructure as code, including modularization, use of variables, and proper state management to ensure reproducibility and maintainability.
+
+## GitHub Repository Structure
+- When commiting code, ensure that it is well-documented and follows the project's coding standards. Use descriptive commit messages that clearly explain the changes made.
+- Make minimal commits that focus on a single change or feature to facilitate easier code reviews and maintain a clean commit history.
+- Organize the repository with clear directories for different components (e.g., `scrapers/`, `mcp_tools/`, `sync/`, `vectorization/`, `tests/`, `prompts/`, `models/`, `aws/`, `chroma/`, `terraform/`).
+- Use branches effectively to manage different features or bug fixes, and ensure that pull requests
+- Use Pull Requests before merging to the main branch, and include a clear description of the changes and any relevant context for reviewers. Ensure that all tests pass before merging.
