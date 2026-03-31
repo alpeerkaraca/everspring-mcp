@@ -68,7 +68,7 @@ def sample_document() -> DocumentRecord:
         minor_version=0,
         patch_version=5,
         content_hash="a" * 64,
-        file_path="spring-boot/4.0.5/getting-started.md",
+        file_path="getting-started.md",
         s3_key="docs/spring-boot/4.0.5/getting-started.md",
         size_bytes=12345,
         scraped_at=datetime(2024, 1, 15, 10, 30, 0, tzinfo=timezone.utc),

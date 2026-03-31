@@ -10,6 +10,7 @@ This module coordinates the full S3 → Local → SQLite sync flow:
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Awaitable
 from datetime import datetime, timezone
@@ -17,7 +18,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
 from ..models.base import compute_hash
-from ..models.spring import SpringModule
+from ..models.spring import SpringModule, SpringVersion
 from ..models.sync import ChangeType, SyncDelta, SyncStatus
 from ..storage.repository import (
     DocumentRecord,
@@ -203,31 +204,48 @@ class SyncOrchestrator:
             
             download_results = await self.s3.download_changes(delta, module, version)
             
-            # Process download results
-            for i, download in enumerate(download_results):
+            # Separate metadata and markdown downloads
+            metadata_cache: dict[str, dict] = {}
+            markdown_downloads: list[DownloadResult] = []
+            
+            for download in download_results:
+                relative_path = self._relative_path(download.s3_key, module, version)
+                if self._is_metadata_path(relative_path):
+                    if download.success:
+                        metadata = self._load_metadata(download.local_path)
+                        url_hash = Path(relative_path).stem
+                        metadata_cache[url_hash] = metadata
+                    else:
+                        result.errors.append(download.error or f"Failed: {download.s3_key}")
+                    continue
+                markdown_downloads.append(download)
+            
+            # Process markdown downloads
+            for i, download in enumerate(markdown_downloads):
                 await self._report_progress(
                     f"Processing {download.s3_key}",
                     i + 1,
-                    len(download_results),
+                    len(markdown_downloads),
                 )
                 
                 if download.success:
-                    # Update database
+                    url_hash = Path(self._relative_path(download.s3_key, module, version)).stem
+                    metadata = metadata_cache.get(url_hash)
                     await self._process_downloaded_file(
-                        download, module, version, delta,
+                        download, module, version, metadata,
                     )
                     result.bytes_downloaded += download.size_bytes
                 else:
                     result.errors.append(download.error or f"Failed: {download.s3_key}")
             
-            # Count results
+            # Count results (only markdown files)
             result.files_added = sum(
-                1 for d in download_results
-                if d.success and self._is_added(d.s3_key, delta)
+                1 for d in markdown_downloads
+                if d.success and self._is_added(d.s3_key, delta, module, version)
             )
             result.files_modified = sum(
-                1 for d in download_results
-                if d.success and self._is_modified(d.s3_key, delta)
+                1 for d in markdown_downloads
+                if d.success and self._is_modified(d.s3_key, delta, module, version)
             )
             
             # Step 5: Handle removals
@@ -235,12 +253,12 @@ class SyncOrchestrator:
                 c for c in delta.changes
                 if c.change_type == ChangeType.REMOVED
             ]
-            
+
             for change in removed_changes:
                 s3_key = self.config.get_s3_key(module, version, change.path)
                 deleted = await self.s3.delete_local_file(s3_key)
                 
-                if deleted:
+                if deleted and not self._is_metadata_path(change.path):
                     await self.storage.documents.delete_by_s3_key(s3_key)
                     result.files_removed += 1
             
@@ -286,7 +304,7 @@ class SyncOrchestrator:
         download: DownloadResult,
         module: str,
         version: str,
-        delta: SyncDelta,
+        metadata: dict | None,
     ) -> None:
         """Process a successfully downloaded file.
         
@@ -294,7 +312,7 @@ class SyncOrchestrator:
             download: Download result
             module: Spring module
             version: Version string
-            delta: Sync delta (for metadata)
+            metadata: Optional metadata JSON for this document
         """
         # Parse version parts
         parts = version.split(".")
@@ -302,29 +320,38 @@ class SyncOrchestrator:
         minor = int(parts[1]) if len(parts) > 1 else 0
         patch = int(parts[2]) if len(parts) > 2 else 0
         
-        # Extract filename and generate ID
-        filename = download.s3_key.split("/")[-1]
+        # Extract relative path within module/version
+        relative_path = self._relative_path(download.s3_key, module, version)
+        url_hash = Path(relative_path).stem
         
         # Read file to extract title (first heading)
         title = await self._extract_title(download.local_path)
+        source_url = None
+        scraped_at = datetime.now(timezone.utc)
         
-        # Generate document ID from S3 key
-        doc_id = compute_hash(download.s3_key)[:16]
+        if metadata:
+            source_url = metadata.get("url")
+            title = metadata.get("title") or title
+            if metadata.get("scraped_at"):
+                scraped_at = self._parse_iso_datetime(metadata["scraped_at"])
+        
+        # Generate document ID from URL hash
+        doc_id = url_hash or compute_hash(download.s3_key)[:16]
         
         # Create/update document record
         doc = DocumentRecord(
             id=doc_id,
-            url=f"s3://{self.config.s3_bucket}/{download.s3_key}",
+            url=source_url or f"s3://{self.config.s3_bucket}/{download.s3_key}",
             title=title,
             module=module,
             major_version=major,
             minor_version=minor,
             patch_version=patch,
             content_hash=download.content_hash,
-            file_path=str(download.local_path.relative_to(self.config.docs_dir)),
+            file_path=relative_path,
             s3_key=download.s3_key,
             size_bytes=download.size_bytes,
-            scraped_at=datetime.now(timezone.utc),
+            scraped_at=scraped_at,
             synced_at=datetime.now(timezone.utc),
             schema_version="1.0.0",
             is_indexed=False,  # Will be indexed by ChromaDB later
@@ -376,23 +403,51 @@ class SyncOrchestrator:
         
         return mapping.get(module, SpringModule.BOOT)
     
-    def _is_added(self, s3_key: str, delta: SyncDelta) -> bool:
+    def _is_added(self, s3_key: str, delta: SyncDelta, module: str, version: str) -> bool:
         """Check if S3 key was an addition."""
-        filename = s3_key.split("/")[-1]
+        filename = self._relative_path(s3_key, module, version)
         return any(
             c.path == filename and c.change_type == ChangeType.ADDED
             for c in delta.changes
         )
     
-    def _is_modified(self, s3_key: str, delta: SyncDelta) -> bool:
+    def _is_modified(self, s3_key: str, delta: SyncDelta, module: str, version: str) -> bool:
         """Check if S3 key was a modification."""
-        filename = s3_key.split("/")[-1]
+        filename = self._relative_path(s3_key, module, version)
         return any(
             c.path == filename and c.change_type == ChangeType.MODIFIED
             for c in delta.changes
         )
+
+    def _relative_path(self, s3_key: str, module: str, version: str) -> str:
+        """Get relative path within module/version."""
+        prefix = f"{self.config.s3_prefix}/{module}/{version}/"
+        if s3_key.startswith(prefix):
+            return s3_key[len(prefix):]
+        return s3_key.split("/")[-1]
+
+    @staticmethod
+    def _is_metadata_path(relative_path: str) -> bool:
+        """Check if relative path is metadata JSON."""
+        return relative_path.startswith("metadata/") and relative_path.endswith(".json")
+
+    @staticmethod
+    def _load_metadata(path: Path) -> dict:
+        """Load metadata JSON from file."""
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            logger.warning("Failed to parse metadata JSON: %s", path)
+            return {}
+
+    @staticmethod
+    def _parse_iso_datetime(value: str) -> datetime:
+        """Parse ISO datetime with Z support."""
+        if value.endswith("Z"):
+            value = value[:-1] + "+00:00"
+        return datetime.fromisoformat(value)
     
-    async def get_sync_status(self, module: str, version: str) -> dict:
+    async def get_sync_status(self, module: SpringModule, version: SpringVersion | str) -> dict:
         """Get current sync status for a module/version.
         
         Args:
@@ -405,7 +460,7 @@ class SyncOrchestrator:
         # Get document count
         docs = await self.storage.documents.get_by_module_version(
             module=module,
-            major=int(version.split(".")[0]),
+            major=int(version.major) if isinstance(version, SpringVersion) else int(version.split(".")[0]),
         )
         
         # Get last sync

@@ -112,18 +112,19 @@ class SyncConfig(BaseModel):
         
         return self.docs_dir / relative_key
     
-    def get_s3_key(self, module: str, version: str, filename: str) -> str:
-        """Build S3 key for a document.
+    def get_s3_key(self, module: str, version: str, relative_path: str) -> str:
+        """Build S3 key for a document or metadata file.
         
         Args:
             module: Spring module (e.g., "spring-boot")
             version: Version string (e.g., "4.0.5")
-            filename: Document filename
+            relative_path: Path relative to module/version (supports subdirs)
             
         Returns:
             Full S3 key
         """
-        return f"{self.s3_prefix}/{module}/{version}/{filename}"
+        clean_path = relative_path.lstrip("/")
+        return f"{self.s3_prefix}/{module}/{version}/{clean_path}"
     
     def get_manifest_key(self, module: str, version: str) -> str:
         """Get S3 key for manifest file.

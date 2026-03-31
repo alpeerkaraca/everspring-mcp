@@ -422,6 +422,7 @@ class S3SyncService:
             Generated manifest
         """
         files = await self.list_s3_files(module, version)
+        prefix = f"{self.config.s3_prefix}/{module}/{version}/"
         
         entries: list[FileEntry] = []
         total_size = 0
@@ -451,11 +452,15 @@ class S3SyncService:
                     content = obj_response["Body"].read()
                     content_hash = compute_hash(content)
                 
-                # Extract filename from key
-                filename = key.split("/")[-1]
+                if not key.startswith(prefix):
+                    logger.warning("Skipping unexpected key: %s", key)
+                    continue
+
+                # Store path relative to module/version (preserves subdirectories like metadata/)
+                relative_path = key[len(prefix):]
                 
                 entries.append(FileEntry(
-                    path=filename,
+                    path=relative_path,
                     content_hash=content_hash,
                     size_bytes=f["size"],
                 ))
