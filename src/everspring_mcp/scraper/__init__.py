@@ -2,6 +2,7 @@
 
 This package provides tools for scraping Spring documentation:
 - SpringBrowser: Async Playwright browser with retry and rate limiting
+- SpringDocParser: HTML parsing and Markdown conversion
 - Custom exceptions for error handling
 """
 
@@ -14,12 +15,25 @@ from .exceptions import (
     RateLimitError,
     ScraperError,
 )
+from .parser import (
+    LANGUAGE_PATTERNS,
+    SPRING_DOC_SELECTORS,
+    ParserConfig,
+    SpringDocParser,
+    SpringMarkdownConverter,
+)
 
 __all__ = [
     # Browser
     "SpringBrowser",
     "BrowserConfig",
     "USER_AGENTS",
+    # Parser
+    "SpringDocParser",
+    "ParserConfig",
+    "SpringMarkdownConverter",
+    "SPRING_DOC_SELECTORS",
+    "LANGUAGE_PATTERNS",
     # Exceptions
     "ScraperError",
     "NavigationError",
