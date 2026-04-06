@@ -20,6 +20,7 @@ EverSpring solves this by creating a verified bridge between official Spring doc
 ## 🔧 Key Features
 - **Hybrid Search:** Combines dense retrieval (Cosine Similarity) with sparse retrieval (BM25) using Reciprocal Rank Fusion.
 - **Semantic Search:** Find the right Spring patterns using `google/embedding-gemma-300m` embeddings.
+- **Model-Aware Chunking:** Uses the embedding model's native tokenizer (AutoTokenizer) for accurate token counting, ensuring chunks never exceed the 2048 token limit.
 - **Deprecation Guard:** Automatically flags deprecated APIs based on current release notes.
 - **Zero-Config Sync:** Automatically pulls the latest "Knowledge Pack" from S3 via incremental sync.
 - **Auto Version Detection:** Scraper reads `span.version` and fails fast when missing or invalid.

@@ -12,7 +12,7 @@ import re
 import hashlib
 from dataclasses import dataclass
 
-import tiktoken
+from transformers import AutoTokenizer
 
 
 HEADING_PATTERN = re.compile(r"^(#{1,6})\s+(.+)$")
@@ -39,18 +39,28 @@ class MarkdownChunk:
 class MarkdownChunker:
     """Chunk markdown by headings then enforce token size.
     
+    Uses the actual tokenizer from the embedding model to ensure accurate
+    token counting and proper chunk sizing.
+    
     Args:
+        model_name: HuggingFace model name (for tokenizer)
         max_tokens: Max tokens per chunk
         overlap_tokens: Overlap between chunks
     """
     
-    def __init__(self, max_tokens: int = 500, overlap_tokens: int = 50) -> None:
+    def __init__(
+        self,
+        model_name: str = "google/embeddinggemma-300m",
+        max_tokens: int = 512,
+        overlap_tokens: int = 50,
+    ) -> None:
+        self.model_name = model_name
         self.max_tokens = max_tokens
         self.overlap_tokens = overlap_tokens
-        self._encoder = tiktoken.get_encoding("cl100k_base")
+        self._tokenizer = AutoTokenizer.from_pretrained(model_name)
     
     def _count_tokens(self, text: str) -> int:
-        return len(self._encoder.encode(text))
+        return len(self._tokenizer.encode(text, add_special_tokens=False))
     
     def _clean_content(self, text: str) -> str:
         """Remove Spring docs artifacts from content."""
@@ -96,7 +106,7 @@ class MarkdownChunker:
     
     def _split_by_tokens(self, text: str) -> list[str]:
         """Split text into token-limited chunks with natural boundaries."""
-        tokens = self._encoder.encode(text)
+        tokens = self._tokenizer.encode(text, add_special_tokens=False)
         if len(tokens) <= self.max_tokens:
             return [text]
 
@@ -104,12 +114,12 @@ class MarkdownChunker:
         start = 0
         while start < len(tokens):
             end = min(start + self.max_tokens, len(tokens))
-            chunk_text = self._encoder.decode(tokens[start:end]).strip()
+            chunk_text = self._tokenizer.decode(tokens[start:end], skip_special_tokens=True).strip()
 
             if end < len(tokens):
                 chunk_text = self._find_natural_break(chunk_text)
             if not chunk_text:
-                chunk_text = self._encoder.decode(tokens[start:end]).strip()
+                chunk_text = self._tokenizer.decode(tokens[start:end], skip_special_tokens=True).strip()
             if not chunk_text:
                 break
 
@@ -117,7 +127,7 @@ class MarkdownChunker:
             if end == len(tokens):
                 break
 
-            used_tokens = len(self._encoder.encode(chunk_text))
+            used_tokens = len(self._tokenizer.encode(chunk_text, add_special_tokens=False))
             step = max(1, used_tokens - self.overlap_tokens)
             start += step
 

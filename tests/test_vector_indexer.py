@@ -34,7 +34,11 @@ More content here.
 
 
 def test_chunking_hybrid(sample_markdown: str) -> None:
-    chunker = MarkdownChunker(max_tokens=50, overlap_tokens=5)
+    chunker = MarkdownChunker(
+        model_name="google/embeddinggemma-300m",
+        max_tokens=50,
+        overlap_tokens=5,
+    )
     chunks = chunker.chunk(sample_markdown)
     assert len(chunks) > 1
     assert any(c.has_code for c in chunks)
@@ -42,7 +46,11 @@ def test_chunking_hybrid(sample_markdown: str) -> None:
 
 
 def test_chunking_removes_copied_artifacts() -> None:
-    chunker = MarkdownChunker(max_tokens=120, overlap_tokens=10)
+    chunker = MarkdownChunker(
+        model_name="google/embeddinggemma-300m",
+        max_tokens=120,
+        overlap_tokens=10,
+    )
     markdown = """
 ## Configure
 Use this snippet:
@@ -97,3 +105,25 @@ async def test_prefetch_model_loads_once(monkeypatch: pytest.MonkeyPatch) -> Non
     await embedder.prefetch_model()
 
     assert load_calls == 1
+
+
+def test_chunking_enforces_token_limit() -> None:
+    """Test that chunks never exceed max_tokens."""
+    chunker = MarkdownChunker(
+        model_name="google/embeddinggemma-300m",
+        max_tokens=100,
+        overlap_tokens=10,
+    )
+    
+    # Create a long markdown doc
+    long_text = "\n\n".join([f"## Section {i}\n" + "word " * 200 for i in range(5)])
+    chunks = chunker.chunk(long_text)
+    
+    # Verify no chunk exceeds limit
+    for chunk in chunks:
+        token_count = chunker._count_tokens(chunk.content)
+        assert token_count <= 100, f"Chunk exceeded limit: {token_count} tokens"
+    
+    # Verify we got multiple chunks (doc was too long for one)
+    assert len(chunks) > 1
+

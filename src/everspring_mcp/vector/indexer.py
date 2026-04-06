@@ -45,6 +45,7 @@ class VectorIndexer:
         start = time.perf_counter()
         self.config = config or VectorConfig.from_env()
         self.chunker = MarkdownChunker(
+            model_name=self.config.embedding_model,
             max_tokens=self.config.max_tokens,
             overlap_tokens=self.config.overlap_tokens,
         )

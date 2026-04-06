@@ -59,9 +59,10 @@ class VectorConfig(BaseModel):
         description="Embedding model ID",
     )
     max_tokens: int = Field(
-        default=500,
+        default=512,
         ge=100,
-        description="Max tokens per chunk",
+        le=2048,
+        description="Max tokens per chunk (model limit is 2048)",
     )
     overlap_tokens: int = Field(
         default=50,

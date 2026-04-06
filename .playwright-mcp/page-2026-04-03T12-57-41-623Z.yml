@@ -1,0 +1,219 @@
+- generic [ref=e2]:
+  - generic [ref=e3]:
+    - generic [ref=e4]:
+      - generic [ref=e5]:
+        - heading "MCP Inspector v0.21.1" [level=1] [ref=e8]
+        - generic [ref=e10]:
+          - generic [ref=e11]:
+            - text: Transport Type
+            - combobox "Transport Type" [ref=e12] [cursor=pointer]:
+              - generic: STDIO
+              - img [ref=e13]
+          - generic [ref=e15]:
+            - text: Command
+            - textbox "Command" [active] [ref=e16]: uv
+          - generic [ref=e17]:
+            - text: Arguments
+            - textbox "Arguments" [ref=e18]:
+              - /placeholder: Arguments (space-separated)
+              - text: run --with mcp mcp run C:\Users\AlperKaraca\Desktop\everspring_mcp\src\everspring_mcp\mcp\dev_server.py:mcp
+          - button "Environment Variables" [ref=e20] [cursor=pointer]:
+            - img [ref=e21]
+            - text: Environment Variables
+          - generic [ref=e23]:
+            - button "Server Entry" [ref=e24] [cursor=pointer]:
+              - img [ref=e25]
+              - text: Server Entry
+            - button "Servers File" [ref=e28] [cursor=pointer]:
+              - img [ref=e29]
+              - text: Servers File
+          - button "Authentication" [ref=e33] [cursor=pointer]:
+            - img [ref=e34]
+            - text: Authentication
+          - button "Configuration" [ref=e37] [cursor=pointer]:
+            - img [ref=e38]
+            - img [ref=e40]
+            - text: Configuration
+          - generic [ref=e43]:
+            - button "Connect" [ref=e44] [cursor=pointer]:
+              - img [ref=e45]
+              - text: Connect
+            - generic [ref=e49]: Connection Error - Did you add the proxy session token in Configuration?
+        - generic [ref=e51]:
+          - combobox [ref=e52] [cursor=pointer]:
+            - generic: System
+            - img [ref=e53]
+          - generic [ref=e55]:
+            - link "Inspector Documentation" [ref=e56] [cursor=pointer]:
+              - /url: https://modelcontextprotocol.io/docs/tools/inspector
+              - img [ref=e57]
+            - link "Debugging Guide" [ref=e60] [cursor=pointer]:
+              - /url: https://modelcontextprotocol.io/docs/tools/debugging
+              - img [ref=e61]
+            - link "Report bugs or contribute on GitHub" [ref=e70] [cursor=pointer]:
+              - /url: https://github.com/modelcontextprotocol/inspector
+              - img [ref=e71]
+      - generic "Resize sidebar" [ref=e74]
+    - generic [ref=e75]:
+      - generic [ref=e77]:
+        - paragraph [ref=e78]: Connect to an MCP server to start inspecting
+        - generic [ref=e79]:
+          - paragraph [ref=e80]: Need to configure authentication?
+          - button "Open Auth Settings" [ref=e81] [cursor=pointer]
+      - generic [ref=e86]:
+        - generic [ref=e87]:
+          - generic [ref=e88]:
+            - heading "History" [level=2] [ref=e89]
+            - button "Clear" [disabled]
+          - paragraph [ref=e90]: No history yet
+        - generic [ref=e91]:
+          - generic [ref=e92]:
+            - heading "Server Notifications" [level=2] [ref=e93]
+            - button "Clear" [ref=e95] [cursor=pointer]
+          - list [ref=e96]:
+            - listitem [ref=e97]:
+              - generic [ref=e98] [cursor=pointer]:
+                - generic [ref=e99]: 16. notifications/message
+                - generic [ref=e100]: ▶
+            - listitem [ref=e101]:
+              - generic [ref=e102] [cursor=pointer]:
+                - generic [ref=e103]: 15. notifications/message
+                - generic [ref=e104]: ▶
+            - listitem [ref=e105]:
+              - generic [ref=e106] [cursor=pointer]:
+                - generic [ref=e107]: 14. notifications/message
+                - generic [ref=e108]: ▶
+            - listitem [ref=e109]:
+              - generic [ref=e110] [cursor=pointer]:
+                - generic [ref=e111]: 13. notifications/message
+                - generic [ref=e112]: ▶
+            - listitem [ref=e113]:
+              - generic [ref=e114] [cursor=pointer]:
+                - generic [ref=e115]: 12. notifications/message
+                - generic [ref=e116]: ▶
+            - listitem [ref=e237]:
+              - generic [ref=e238] [cursor=pointer]:
+                - generic [ref=e239]: 11. notifications/message
+                - generic [ref=e240]: ▶
+            - listitem [ref=e241]:
+              - generic [ref=e242] [cursor=pointer]:
+                - generic [ref=e243]: 10. notifications/message
+                - generic [ref=e244]: ▶
+            - listitem [ref=e245]:
+              - generic [ref=e246] [cursor=pointer]:
+                - generic [ref=e247]: 9. notifications/message
+                - generic [ref=e248]: ▶
+            - listitem [ref=e369]:
+              - generic [ref=e370] [cursor=pointer]:
+                - generic [ref=e371]: 8. notifications/message
+                - generic [ref=e372]: ▼
+              - generic [ref=e373]:
+                - generic [ref=e375]: "Details:"
+                - generic [ref=e376]:
+                  - button [ref=e377] [cursor=pointer]:
+                    - img [ref=e378]
+                  - generic [ref=e382]:
+                    - generic [ref=e384] [cursor=pointer]: "{"
+                    - generic [ref=e385]:
+                      - generic [ref=e387]:
+                        - generic [ref=e388]: "method:"
+                        - generic [ref=e389]: "\"notifications/message\""
+                        - button "Copy value of method" [ref=e390] [cursor=pointer]:
+                          - img [ref=e391]
+                      - generic [ref=e395]:
+                        - generic [ref=e396] [cursor=pointer]:
+                          - generic [ref=e397]: "params:"
+                          - generic [ref=e398]: "{"
+                        - generic [ref=e399]:
+                          - generic [ref=e401]:
+                            - generic [ref=e402]: "level:"
+                            - generic [ref=e403]: "\"info\""
+                            - button "Copy value of level" [ref=e404] [cursor=pointer]:
+                              - img [ref=e405]
+                          - generic [ref=e409]:
+                            - generic [ref=e410]: "logger:"
+                            - generic [ref=e411]: "\"stdio\""
+                            - button "Copy value of logger" [ref=e412] [cursor=pointer]:
+                              - img [ref=e413]
+                          - generic [ref=e417]:
+                            - generic [ref=e418] [cursor=pointer]:
+                              - generic [ref=e419]: "data:"
+                              - generic [ref=e420]: "{"
+                            - generic [ref=e423]:
+                              - generic [ref=e424]: "message:"
+                              - generic [ref=e425]: "\"File not found: C:\\Users\\AlperKaraca\\Desktop\\everspring_mcp\\.srceverspring_mcpmcpdev_server.py\""
+                              - button "Copy value of message" [ref=e426] [cursor=pointer]:
+                                - img [ref=e427]
+                            - generic [ref=e430]: "}"
+                        - generic [ref=e431]: "}"
+                    - generic [ref=e432]: "}"
+            - listitem [ref=e433]:
+              - generic [ref=e434] [cursor=pointer]:
+                - generic [ref=e435]: 7. notifications/message
+                - generic [ref=e436]: ▶
+            - listitem [ref=e437]:
+              - generic [ref=e438] [cursor=pointer]:
+                - generic [ref=e439]: 6. notifications/message
+                - generic [ref=e440]: ▼
+              - generic [ref=e441]:
+                - generic [ref=e443]: "Details:"
+                - generic [ref=e444]:
+                  - button [ref=e445] [cursor=pointer]:
+                    - img [ref=e446]
+                  - generic [ref=e450]:
+                    - generic [ref=e452] [cursor=pointer]: "{"
+                    - generic [ref=e453]:
+                      - generic [ref=e455]:
+                        - generic [ref=e456]: "method:"
+                        - generic [ref=e457]: "\"notifications/message\""
+                        - button "Copy value of method" [ref=e458] [cursor=pointer]:
+                          - img [ref=e459]
+                      - generic [ref=e463]:
+                        - generic [ref=e464] [cursor=pointer]:
+                          - generic [ref=e465]: "params:"
+                          - generic [ref=e466]: "{"
+                        - generic [ref=e467]:
+                          - generic [ref=e469]:
+                            - generic [ref=e470]: "level:"
+                            - generic [ref=e471]: "\"info\""
+                            - button "Copy value of level" [ref=e472] [cursor=pointer]:
+                              - img [ref=e473]
+                          - generic [ref=e477]:
+                            - generic [ref=e478]: "logger:"
+                            - generic [ref=e479]: "\"stdio\""
+                            - button "Copy value of logger" [ref=e480] [cursor=pointer]:
+                              - img [ref=e481]
+                          - generic [ref=e485]:
+                            - generic [ref=e486] [cursor=pointer]:
+                              - generic [ref=e487]: "data:"
+                              - generic [ref=e488]: "{"
+                            - generic [ref=e491]:
+                              - generic [ref=e492]: "message:"
+                              - generic [ref=e493]: "\"File not found: C:\\Users\\AlperKaraca\\Desktop\\everspring_mcp\\.srceverspring_mcpmcpdev_server.py\""
+                              - button "Copy value of message" [ref=e494] [cursor=pointer]:
+                                - img [ref=e495]
+                            - generic [ref=e498]: "}"
+                        - generic [ref=e499]: "}"
+                    - generic [ref=e500]: "}"
+            - listitem [ref=e501]:
+              - generic [ref=e502] [cursor=pointer]:
+                - generic [ref=e503]: 5. notifications/message
+                - generic [ref=e504]: ▶
+            - listitem [ref=e505]:
+              - generic [ref=e506] [cursor=pointer]:
+                - generic [ref=e507]: 4. notifications/message
+                - generic [ref=e508]: ▶
+            - listitem [ref=e509]:
+              - generic [ref=e510] [cursor=pointer]:
+                - generic [ref=e511]: 3. notifications/message
+                - generic [ref=e512]: ▶
+            - listitem [ref=e513]:
+              - generic [ref=e514] [cursor=pointer]:
+                - generic [ref=e515]: 2. notifications/message
+                - generic [ref=e516]: ▶
+            - listitem [ref=e517]:
+              - generic [ref=e518] [cursor=pointer]:
+                - generic [ref=e519]: 1. notifications/message
+                - generic [ref=e520]: ▶
+  - region "Notifications (F8)":
+    - list

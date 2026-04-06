@@ -1,0 +1,241 @@
+- generic [ref=e2]:
+  - generic [ref=e3]:
+    - generic [ref=e4]:
+      - generic [ref=e5]:
+        - heading "MCP Inspector v0.21.1" [level=1] [ref=e8]
+        - generic [ref=e10]:
+          - generic [ref=e11]:
+            - text: Transport Type
+            - combobox "Transport Type" [ref=e12] [cursor=pointer]:
+              - generic: STDIO
+              - img [ref=e13]
+          - generic [ref=e15]:
+            - text: Command
+            - textbox "Command" [ref=e16]: uv
+          - generic [ref=e17]:
+            - text: Arguments
+            - textbox "Arguments" [ref=e18]:
+              - /placeholder: Arguments (space-separated)
+              - text: run --with mcp mcp run .\src\everspring_mcp\mcp\dev_server.py:mcp
+          - button "Environment Variables" [ref=e20] [cursor=pointer]:
+            - img [ref=e21]
+            - text: Environment Variables
+          - generic [ref=e23]:
+            - button "Server Entry" [ref=e24] [cursor=pointer]:
+              - img [ref=e342]
+              - text: Server Entry
+            - button "Servers File" [ref=e28] [cursor=pointer]:
+              - img [ref=e29]
+              - text: Servers File
+          - button "Authentication" [ref=e33] [cursor=pointer]:
+            - img [ref=e34]
+            - text: Authentication
+          - generic [ref=e36]:
+            - button "Configuration" [expanded] [ref=e37] [cursor=pointer]:
+              - img [ref=e409]
+              - img [ref=e40]
+              - text: Configuration
+            - generic [ref=e411]:
+              - generic [ref=e412]:
+                - generic [ref=e413]:
+                  - generic [ref=e414]: Request Timeout
+                  - img [ref=e415]
+                - spinbutton "Request Timeout" [ref=e418]: "120000"
+              - generic [ref=e419]:
+                - generic [ref=e420]:
+                  - generic [ref=e421]: Reset Timeout on Progress
+                  - img [ref=e422]
+                - combobox "Reset Timeout on Progress" [ref=e425] [cursor=pointer]:
+                  - generic: "True"
+                  - img [ref=e426]
+              - generic [ref=e428]:
+                - generic [ref=e429]:
+                  - generic [ref=e430]: Maximum Total Timeout
+                  - img [ref=e431]
+                - spinbutton "Maximum Total Timeout" [active] [ref=e434]: "180000"
+              - generic [ref=e435]:
+                - generic [ref=e436]:
+                  - generic [ref=e437]: Inspector Proxy Address
+                  - img [ref=e438]
+                - textbox "Inspector Proxy Address" [ref=e441]
+              - generic [ref=e442]:
+                - generic [ref=e443]:
+                  - generic [ref=e444]: Proxy Session Token
+                  - img [ref=e445]
+                - textbox "Proxy Session Token" [ref=e448]
+              - generic [ref=e449]:
+                - generic [ref=e450]:
+                  - generic [ref=e451]: Task TTL
+                  - img [ref=e452]
+                - spinbutton "Task TTL" [ref=e455]: "60000"
+          - generic [ref=e43]:
+            - button "Connect" [ref=e44] [cursor=pointer]:
+              - img [ref=e45]
+              - text: Connect
+            - generic [ref=e49]: Connection Error - Did you add the proxy session token in Configuration?
+        - generic [ref=e51]:
+          - combobox [ref=e52] [cursor=pointer]:
+            - generic: System
+            - img [ref=e53]
+          - generic [ref=e55]:
+            - link "Inspector Documentation" [ref=e56] [cursor=pointer]:
+              - /url: https://modelcontextprotocol.io/docs/tools/inspector
+              - img [ref=e57]
+            - link "Debugging Guide" [ref=e60] [cursor=pointer]:
+              - /url: https://modelcontextprotocol.io/docs/tools/debugging
+              - img [ref=e61]
+            - link "Report bugs or contribute on GitHub" [ref=e70] [cursor=pointer]:
+              - /url: https://github.com/modelcontextprotocol/inspector
+              - img [ref=e71]
+      - generic "Resize sidebar" [ref=e74]
+    - generic [ref=e75]:
+      - generic [ref=e77]:
+        - paragraph [ref=e78]: Connect to an MCP server to start inspecting
+        - generic [ref=e79]:
+          - paragraph [ref=e80]: Need to configure authentication?
+          - button "Open Auth Settings" [ref=e81] [cursor=pointer]
+      - generic [ref=e86]:
+        - generic [ref=e87]:
+          - generic [ref=e88]:
+            - heading "History" [level=2] [ref=e89]
+            - button "Clear" [disabled]
+          - paragraph [ref=e90]: No history yet
+        - generic [ref=e91]:
+          - generic [ref=e92]:
+            - heading "Server Notifications" [level=2] [ref=e93]
+            - button "Clear" [ref=e95] [cursor=pointer]
+          - list [ref=e96]:
+            - listitem [ref=e97]:
+              - generic [ref=e98] [cursor=pointer]:
+                - generic [ref=e99]: 23. notifications/message
+                - generic [ref=e100]: ▶
+            - listitem [ref=e101]:
+              - generic [ref=e102] [cursor=pointer]:
+                - generic [ref=e103]: 22. notifications/message
+                - generic [ref=e104]: ▶
+            - listitem [ref=e105]:
+              - generic [ref=e106] [cursor=pointer]:
+                - generic [ref=e107]: 21. notifications/message
+                - generic [ref=e108]: ▶
+            - listitem [ref=e109]:
+              - generic [ref=e110] [cursor=pointer]:
+                - generic [ref=e111]: 20. notifications/message
+                - generic [ref=e112]: ▶
+            - listitem [ref=e113]:
+              - generic [ref=e114] [cursor=pointer]:
+                - generic [ref=e115]: 19. notifications/message
+                - generic [ref=e116]: ▶
+            - listitem [ref=e117]:
+              - generic [ref=e118] [cursor=pointer]:
+                - generic [ref=e119]: 18. notifications/message
+                - generic [ref=e120]: ▶
+            - listitem [ref=e121]:
+              - generic [ref=e122] [cursor=pointer]:
+                - generic [ref=e123]: 17. notifications/message
+                - generic [ref=e124]: ▶
+            - listitem [ref=e185]:
+              - generic [ref=e186] [cursor=pointer]:
+                - generic [ref=e187]: 16. notifications/message
+                - generic [ref=e188]: ▶
+            - listitem [ref=e189]:
+              - generic [ref=e190] [cursor=pointer]:
+                - generic [ref=e191]: 15. notifications/message
+                - generic [ref=e192]: ▶
+            - listitem [ref=e193]:
+              - generic [ref=e194] [cursor=pointer]:
+                - generic [ref=e195]: 14. notifications/message
+                - generic [ref=e196]: ▶
+            - listitem [ref=e257]:
+              - generic [ref=e258] [cursor=pointer]:
+                - generic [ref=e259]: 13. notifications/message
+                - generic [ref=e260]: ▶
+            - listitem [ref=e324]:
+              - generic [ref=e325] [cursor=pointer]:
+                - generic [ref=e326]: 12. notifications/message
+                - generic [ref=e327]: ▶
+            - listitem [ref=e328]:
+              - generic [ref=e329] [cursor=pointer]:
+                - generic [ref=e330]: 11. notifications/message
+                - generic [ref=e331]: ▶
+            - listitem [ref=e405]:
+              - generic [ref=e406] [cursor=pointer]:
+                - generic [ref=e407]: 10. notifications/message
+                - generic [ref=e408]: ▼
+              - generic [ref=e664]:
+                - generic [ref=e666]: "Details:"
+                - generic [ref=e667]:
+                  - button [ref=e668] [cursor=pointer]:
+                    - img [ref=e669]
+                  - generic [ref=e673]:
+                    - generic [ref=e675] [cursor=pointer]: "{"
+                    - generic [ref=e676]:
+                      - generic [ref=e678]:
+                        - generic [ref=e679]: "method:"
+                        - generic [ref=e680]: "\"notifications/message\""
+                        - button "Copy value of method" [ref=e681] [cursor=pointer]:
+                          - img [ref=e682]
+                      - generic [ref=e686]:
+                        - generic [ref=e687] [cursor=pointer]:
+                          - generic [ref=e688]: "params:"
+                          - generic [ref=e689]: "{"
+                        - generic [ref=e690]:
+                          - generic [ref=e692]:
+                            - generic [ref=e693]: "level:"
+                            - generic [ref=e694]: "\"info\""
+                            - button "Copy value of level" [ref=e695] [cursor=pointer]:
+                              - img [ref=e696]
+                          - generic [ref=e700]:
+                            - generic [ref=e701]: "logger:"
+                            - generic [ref=e702]: "\"stdio\""
+                            - button "Copy value of logger" [ref=e703] [cursor=pointer]:
+                              - img [ref=e704]
+                          - generic [ref=e708]:
+                            - generic [ref=e709] [cursor=pointer]:
+                              - generic [ref=e710]: "data:"
+                              - generic [ref=e711]: "{"
+                            - generic [ref=e714]:
+                              - generic [ref=e715]: "message:"
+                              - generic [ref=e716]: "\"File not found: C:\\Users\\AlperKaraca\\Desktop\\everspring_mcp\\.srceverspring_mcpmcpdev_server.py\""
+                              - button "Copy value of message" [ref=e717] [cursor=pointer]:
+                                - img [ref=e718]
+                            - generic [ref=e721]: "}"
+                        - generic [ref=e722]: "}"
+                    - generic [ref=e723]: "}"
+            - listitem [ref=e516]:
+              - generic [ref=e517] [cursor=pointer]:
+                - generic [ref=e518]: 9. notifications/message
+                - generic [ref=e519]: ▶
+            - listitem [ref=e520]:
+              - generic [ref=e521] [cursor=pointer]:
+                - generic [ref=e522]: 8. notifications/message
+                - generic [ref=e523]: ▶
+            - listitem [ref=e584]:
+              - generic [ref=e585] [cursor=pointer]:
+                - generic [ref=e586]: 7. notifications/message
+                - generic [ref=e587]: ▶
+            - listitem [ref=e588]:
+              - generic [ref=e589] [cursor=pointer]:
+                - generic [ref=e590]: 6. notifications/message
+                - generic [ref=e591]: ▶
+            - listitem [ref=e652]:
+              - generic [ref=e653] [cursor=pointer]:
+                - generic [ref=e654]: 5. notifications/message
+                - generic [ref=e655]: ▶
+            - listitem [ref=e656]:
+              - generic [ref=e657] [cursor=pointer]:
+                - generic [ref=e658]: 4. notifications/message
+                - generic [ref=e659]: ▶
+            - listitem [ref=e660]:
+              - generic [ref=e661] [cursor=pointer]:
+                - generic [ref=e662]: 3. notifications/message
+                - generic [ref=e663]: ▶
+            - listitem [ref=e724]:
+              - generic [ref=e725] [cursor=pointer]:
+                - generic [ref=e726]: 2. notifications/message
+                - generic [ref=e727]: ▶
+            - listitem [ref=e728]:
+              - generic [ref=e729] [cursor=pointer]:
+                - generic [ref=e730]: 1. notifications/message
+                - generic [ref=e731]: ▶
+  - region "Notifications (F8)":
+    - list
