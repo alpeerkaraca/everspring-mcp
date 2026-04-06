@@ -8,7 +8,7 @@ This package provides tools for scraping Spring documentation:
 - Custom exceptions for error handling
 """
 
-from .browser import BrowserConfig, SpringBrowser, USER_AGENTS
+from .browser import BrowserConfig, NotModifiedSignal, SpringBrowser, USER_AGENTS
 from .discovery import (
     BASE_SKIP_PATTERNS,
     DiscoveredLink,
@@ -54,6 +54,7 @@ __all__ = [
     # Browser
     "SpringBrowser",
     "BrowserConfig",
+    "NotModifiedSignal",
     "USER_AGENTS",
     # Parser
     "SpringDocParser",

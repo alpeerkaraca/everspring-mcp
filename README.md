@@ -38,8 +38,9 @@ EverSpring solves this by creating a verified bridge between official Spring doc
 
 ## 🔄 Current Flow (High Level)
 - Lambda scrapes docs using Playwright, extracts `span.version`, and converts HTML to Markdown.
-- Content is stored in S3 under `docs/{module}/{submodule}/{version}` (or without submodule).
+- Raw content is stored in S3 under `spring-docs/raw-data/{module[-submodule]}/{version}/{url_hash}/`.
 - Local MCP syncs incrementally via manifests and validates hashes.
+- Database backups are uploaded as date-based snapshots under `spring-docs/db-snapshots/`.
 - ChromaDB indexes chunks with module/submodule/version metadata for filtered retrieval.
 
 ## ⚡ Cold-Start Optimization

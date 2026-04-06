@@ -6,10 +6,11 @@ progress notifications, and module/version filtering.
 
 from __future__ import annotations
 
-import asyncio
 import time
 from collections import defaultdict
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
+from xml.sax.saxutils import escape, quoteattr
 
 from ..models.metadata import SearchResult
 from ..utils.logging import get_logger
@@ -31,17 +32,17 @@ logger = get_logger("mcp.tools")
 
 class SpringDocsTool:
     """Spring documentation search tool with hybrid retrieval.
-    
+
     Provides:
     - Vector search with cosine + BM25 + RRF fusion
     - Score threshold enforcement
     - Module/version/submodule filtering
     - Progress notifications
     """
-    
+
     # Default score threshold - results below this are rejected
     DEFAULT_SCORE_THRESHOLD: float = 0.01
-    
+
     # Progress stages
     STAGE_INIT = "initializing"
     STAGE_EMBEDDING = "embedding_query"
@@ -50,14 +51,14 @@ class SpringDocsTool:
     STAGE_FUSION = "rrf_fusion"
     STAGE_FILTERING = "applying_filters"
     STAGE_COMPLETE = "complete"
-    
+
     def __init__(
         self,
         config: VectorConfig | None = None,
         progress_callback: Callable[[ProgressNotification], None] | None = None,
     ) -> None:
         """Initialize the search tool.
-        
+
         Args:
             config: Vector configuration
             progress_callback: Optional callback for progress notifications
@@ -69,7 +70,7 @@ class SpringDocsTool:
         self._chroma: ChromaClient | None = None
         self._initialized = False
         logger.info(f"SpringDocsTool initialized in {time.perf_counter() - start:.3f}s")
-    
+
     def _notify_progress(
         self,
         stage: str,
@@ -86,13 +87,13 @@ class SpringDocsTool:
                 details=details,
             )
             self._progress_callback(notification)
-        
+
         # Also log progress
         logger.info(f"[{percentage:.0f}%] {stage}: {message}")
-    
+
     async def initialize(self) -> bool:
         """Initialize retriever and indexes.
-        
+
         Returns:
             True if initialization successful
         """
@@ -102,17 +103,17 @@ class SpringDocsTool:
             "Loading vector database and indexes...",
             0.0,
         )
-        
+
         try:
             self._chroma = ChromaClient(self.config)
             self._retriever = HybridRetriever(self.config)
-            
+
             self._notify_progress(
                 self.STAGE_INIT,
                 "Loading BM25 sparse index...",
                 30.0,
             )
-            
+
             # Ensure BM25 index is loaded
             bm25_loaded = self._retriever.ensure_bm25_index()
             if not bm25_loaded:
@@ -130,7 +131,7 @@ class SpringDocsTool:
                     50.0,
                     bm25_available=True,
                 )
-            
+
             self._initialized = True
             self._notify_progress(
                 self.STAGE_INIT,
@@ -139,7 +140,7 @@ class SpringDocsTool:
             )
             logger.info(f"Full tool initialization in {time.perf_counter() - start:.2f}s")
             return True
-            
+
         except Exception as e:
             logger.error(f"Failed to initialize search tool: {e}")
             self._notify_progress(
@@ -149,23 +150,23 @@ class SpringDocsTool:
                 error=str(e),
             )
             return False
-    
+
     async def search(
         self,
         params: SearchParameters,
     ) -> SearchResponse:
         """Search Spring documentation.
-        
+
         Args:
             params: Search parameters
-            
+
         Returns:
             SearchResponse with results or error status
         """
         # Ensure initialized
         if not self._initialized:
             await self.initialize()
-        
+
         if not self._retriever:
             return SearchResponse(
                 status=SearchStatus.ERROR,
@@ -175,14 +176,14 @@ class SpringDocsTool:
                 results_returned=0,
                 score_threshold=params.score_threshold,
             )
-        
+
         self._notify_progress(
             self.STAGE_EMBEDDING,
             f"Processing query: '{params.query[:50]}...'",
             10.0,
             query_length=len(params.query),
         )
-        
+
         try:
             # Build filters info for response
             filters_applied: dict[str, Any] = {}
@@ -192,14 +193,14 @@ class SpringDocsTool:
                 filters_applied["version"] = params.version
             if params.submodule:
                 filters_applied["submodule"] = params.submodule
-            
+
             self._notify_progress(
                 self.STAGE_DENSE,
                 "Running hybrid search (dense + sparse)...",
                 30.0,
                 filters=filters_applied,
             )
-            
+
             # Run hybrid search
             # Fetch more candidates than needed for threshold filtering
             fetch_k = params.top_k * 5
@@ -211,45 +212,45 @@ class SpringDocsTool:
                 fetch_k=fetch_k,
                 deduplicate_urls=True,
             )
-            
+
             self._notify_progress(
                 self.STAGE_FUSION,
                 f"Found {len(raw_results)} candidates",
                 60.0,
                 candidates=len(raw_results),
             )
-            
+
             # Apply score threshold filtering
             self._notify_progress(
                 self.STAGE_FILTERING,
                 f"Applying score threshold ({params.score_threshold})...",
                 70.0,
             )
-            
+
             warnings: list[str] = []
             filtered_results: list[SearchResult] = []
-            
+
             for result in raw_results:
                 # Apply submodule filter if specified
                 if params.submodule:
                     result_submodule = result.submodule or ""
                     if result_submodule.lower() != params.submodule.lower():
                         continue
-                
+
                 # Apply score threshold
                 if result.score >= params.score_threshold:
                     filtered_results.append(result)
-            
+
             # Limit to requested top_k
             filtered_results = filtered_results[:params.top_k]
-            
+
             self._notify_progress(
                 self.STAGE_FILTERING,
                 f"{len(filtered_results)} results above threshold",
                 85.0,
                 above_threshold=len(filtered_results),
             )
-            
+
             # Build response
             if not filtered_results:
                 if raw_results:
@@ -270,13 +271,13 @@ class SpringDocsTool:
             else:
                 status = SearchStatus.SUCCESS
                 message = f"Found {len(filtered_results)} relevant results"
-            
+
             # Convert to response items
             result_items = [
                 self._to_result_item(idx + 1, result)
                 for idx, result in enumerate(filtered_results)
             ]
-            
+
             self._notify_progress(
                 self.STAGE_COMPLETE,
                 message,
@@ -284,7 +285,7 @@ class SpringDocsTool:
                 status=status.value,
                 results=len(result_items),
             )
-            
+
             return SearchResponse(
                 status=status,
                 message=message,
@@ -296,7 +297,7 @@ class SpringDocsTool:
                 results=result_items,
                 warnings=warnings,
             )
-            
+
         except Exception as e:
             logger.error(f"Search failed: {e}", exc_info=True)
             return SearchResponse(
@@ -307,7 +308,7 @@ class SpringDocsTool:
                 results_returned=0,
                 score_threshold=params.score_threshold,
             )
-    
+
     def _to_result_item(self, rank: int, result: SearchResult) -> SearchResultItem:
         """Convert SearchResult to SearchResultItem."""
         # Build score breakdown string
@@ -317,10 +318,30 @@ class SpringDocsTool:
         if result.sparse_rank is not None:
             breakdown_parts.append(f"sparse: #{result.sparse_rank}")
         breakdown = ", ".join(breakdown_parts) if breakdown_parts else "N/A"
-        
+
         # Format version string
         version = f"v{result.version_major}.{result.version_minor}"
-        
+
+        attributes = [
+            f"module={quoteattr(result.module)}",
+            f"version={quoteattr(version)}",
+            f"url={quoteattr(result.url)}",
+            f"rank={quoteattr(str(rank))}",
+            f"score={quoteattr(f'{result.score:.4f}')}",
+        ]
+        if result.submodule:
+            attributes.append(f"submodule={quoteattr(result.submodule)}")
+
+        breadcrumb = result.section_path.strip() or result.title
+        xml_content = "\n".join(
+            [
+                f"<spring_doc_chunk {' '.join(attributes)}>",
+                f"  <breadcrumb>{escape(breadcrumb)}</breadcrumb>",
+                f"  <content>{escape(result.content)}</content>",
+                "</spring_doc_chunk>",
+            ]
+        )
+
         return SearchResultItem(
             rank=rank,
             title=result.title,
@@ -330,19 +351,19 @@ class SpringDocsTool:
             submodule=result.submodule,
             score=result.score,
             score_breakdown=breakdown,
-            content=result.content,
+            content=xml_content,
             has_code=result.has_code,
         )
-    
+
     async def get_status(self) -> StatusResponse:
         """Get server/index status.
-        
+
         Returns:
             StatusResponse with index health info
         """
         if not self._initialized:
             await self.initialize()
-        
+
         if not self._chroma:
             return StatusResponse(
                 healthy=False,
@@ -350,17 +371,17 @@ class SpringDocsTool:
                 total_documents=0,
                 bm25_index_loaded=False,
             )
-        
+
         try:
             collection = self._chroma.get_collection()
             total_docs = collection.count()
-            
+
             # Get unique modules and versions
             all_docs = collection.get(include=["metadatas"])
             module_data: dict[str, dict[str, Any]] = defaultdict(
                 lambda: {"versions": set(), "submodules": set(), "count": 0}
             )
-            
+
             if all_docs["metadatas"]:
                 for meta in all_docs["metadatas"]:
                     mod = meta.get("module", "unknown")
@@ -368,7 +389,7 @@ class SpringDocsTool:
                     if meta.get("submodule"):
                         module_data[mod]["submodules"].add(meta.get("submodule"))
                     module_data[mod]["count"] += 1
-            
+
             modules = [
                 ModuleInfo(
                     name=name,
@@ -378,9 +399,9 @@ class SpringDocsTool:
                 )
                 for name, data in sorted(module_data.items())
             ]
-            
+
             bm25_loaded = self._retriever.ensure_bm25_index() if self._retriever else False
-            
+
             return StatusResponse(
                 healthy=True,
                 index_ready=total_docs > 0,
@@ -388,7 +409,7 @@ class SpringDocsTool:
                 total_documents=total_docs,
                 bm25_index_loaded=bm25_loaded,
             )
-            
+
         except Exception as e:
             logger.error(f"Status check failed: {e}")
             return StatusResponse(
@@ -397,10 +418,10 @@ class SpringDocsTool:
                 total_documents=0,
                 bm25_index_loaded=False,
             )
-    
+
     async def list_available_modules(self) -> list[str]:
         """Get list of available modules.
-        
+
         Returns:
             List of module names
         """

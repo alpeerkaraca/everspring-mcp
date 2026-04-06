@@ -24,6 +24,7 @@ class SpringModule(str, Enum):
     SECURITY = "spring-security"
     DATA = "spring-data"
     CLOUD = "spring-cloud"
+    AI = "spring-ai"
     
     @property
     def display_name(self) -> str:
@@ -39,6 +40,7 @@ class SpringModule(str, Enum):
             SpringModule.SECURITY: 6,
             SpringModule.DATA: 4,
             SpringModule.CLOUD: 4,
+            SpringModule.AI: 1
         }
         return minimums.get(self, 1)
 
@@ -52,6 +54,7 @@ class SpringVersion(VersionedModel):
     - Spring Security: 6+
     - Spring Data: 4+
     - Spring Cloud: 4+
+    - Spring AI: 1+
     """
     
     module: SpringModule = Field(

@@ -3,8 +3,8 @@
 Defaults:
 - 5 parallel jobs
 - 5 scrape concurrency per job
-- reference lane -> /doc
-- api-doc lane -> docs/api
+- reference lane -> spring-docs/raw-data
+- api-doc lane -> spring-docs/raw-data
 """
 
 from __future__ import annotations
@@ -41,6 +41,13 @@ class JobResult:
 def _safe_name(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "_", value).strip("_") or "job"
 
+def _normalize_prefix(value: str) -> str:
+    """Normalize S3 prefixes to avoid leading/trailing slash mismatches."""
+    normalized = value.strip().strip("/")
+    if not normalized:
+        raise ValueError("S3 prefix cannot be empty")
+    return normalized
+
 
 def build_jobs(
     csv_path: Path,
@@ -49,6 +56,9 @@ def build_jobs(
     reference_prefix: str,
     api_prefix: str,
 ) -> list[ScrapeJob]:
+    reference_prefix = _normalize_prefix(reference_prefix)
+    api_prefix = _normalize_prefix(api_prefix)
+
     jobs: list[ScrapeJob] = []
     with csv_path.open("r", encoding="utf-8", newline="") as fh:
         reader = csv.DictReader(fh)
@@ -98,7 +108,9 @@ def build_command(
     cmd = [
         uv_bin,
         "run",
-        str(repo_root / "src" / "everspring_mcp" / "main.py"),
+        "python",
+        "-m",
+        "everspring_mcp.main",
         "scrape",
         "--entry-url",
         job.entry_url,
@@ -135,6 +147,7 @@ def run_job(
     try:
         with log_path.open("w", encoding="utf-8") as log_fh:
             log_fh.write(f"COMMAND: {' '.join(cmd)}\n\n")
+            print(f"Job: {job.module}/{sub} [{job.content_type}] -> {log_path}")
             completed = subprocess.run(
                 cmd,
                 cwd=repo_root,
@@ -182,12 +195,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--reference-prefix",
-        default="/docs",
+        default="spring-docs/raw-data",
         help="S3 prefix for reference documentation lane.",
     )
     parser.add_argument(
         "--api-prefix",
-        default="/docs/api",
+        default="spring-docs/raw-data",
         help="S3 prefix for API documentation lane.",
     )
     parser.add_argument(
@@ -213,13 +226,17 @@ def main() -> int:
     include_reference = args.include in ("both", "reference")
     include_api = args.include in ("both", "api")
 
-    jobs = build_jobs(
-        csv_path=csv_path,
-        include_reference=include_reference,
-        include_api=include_api,
-        reference_prefix=args.reference_prefix,
-        api_prefix=args.api_prefix,
-    )
+    try:
+        jobs = build_jobs(
+            csv_path=csv_path,
+            include_reference=include_reference,
+            include_api=include_api,
+            reference_prefix=args.reference_prefix,
+            api_prefix=args.api_prefix,
+        )
+    except ValueError as exc:
+        print(f"Invalid scrape matrix configuration: {exc}", file=sys.stderr)
+        return 2
 
     if not jobs:
         print(f"No jobs found in {csv_path}")

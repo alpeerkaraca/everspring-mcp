@@ -14,32 +14,30 @@ from __future__ import annotations
 
 import asyncio
 import json
-import sys
 import os
-import time
-from datetime import datetime, timezone
+import sys
+from datetime import UTC, datetime
 from enum import Enum
-from typing import Any, ClassVar, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, ClassVar, Self
 
 import boto3
-from botocore.exceptions import ClientError, BotoCoreError
+from botocore.exceptions import ClientError
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
-from typing import Self
 
 from everspring_mcp.models.base import SHA256Hash, VersionedModel, compute_hash
-from everspring_mcp.models.content import ContentType, ScrapedPage
+from everspring_mcp.models.content import ContentType
 from everspring_mcp.models.spring import SpringModule, SpringVersion
 from everspring_mcp.models.sync import S3ObjectRef, SyncManifest
 from everspring_mcp.utils.logging import get_logger, setup_logging
-from .browser import BrowserConfig, SpringBrowser
-from .parser import ParserConfig, SpringDocParser
-from .registry import SubmoduleRegistry, SubmoduleTarget
+
+from .browser import BrowserConfig, NotModifiedSignal, SpringBrowser
 from .exceptions import (
     ContentExtractionError,
     NavigationError,
     RateLimitError,
-    ScraperError,
 )
+from .parser import ParserConfig, SpringDocParser
+from .registry import SubmoduleRegistry, SubmoduleTarget
 
 if TYPE_CHECKING:
     from .discovery import DiscoveryResult
@@ -50,7 +48,7 @@ logger = get_logger("scraper.pipeline")
 
 class PipelineStatus(str, Enum):
     """Status of a pipeline operation."""
-    
+
     SUCCESS = "success"
     SKIPPED = "skipped"  # Content unchanged (hash match)
     FAILED = "failed"
@@ -58,7 +56,7 @@ class PipelineStatus(str, Enum):
 
 class ScrapeTarget(VersionedModel):
     """Target URL specification for scraping.
-    
+
     Attributes:
         url: URL to scrape
         module: Spring module (BOOT, FRAMEWORK, etc.)
@@ -69,7 +67,7 @@ class ScrapeTarget(VersionedModel):
         content_type: Type of documentation
         version_selector: CSS selector for version extraction
     """
-    
+
     url: str = Field(
         pattern=r"^https?://[^\s]+$",
         description="URL to scrape",
@@ -104,7 +102,7 @@ class ScrapeTarget(VersionedModel):
         default="span.version",
         description="CSS selector for version extraction",
     )
-    
+
     @field_validator("module", mode="before")
     @classmethod
     def coerce_module(cls, v: Any) -> SpringModule:
@@ -123,7 +121,7 @@ class ScrapeTarget(VersionedModel):
                 pass
             raise ValueError(f"Invalid Spring module: {v}")
         raise TypeError(f"Expected string or SpringModule, got {type(v)}")
-    
+
     @field_validator("content_type", mode="before")
     @classmethod
     def coerce_content_type(cls, v: Any) -> ContentType:
@@ -142,7 +140,7 @@ class ScrapeTarget(VersionedModel):
                 pass
             raise ValueError(f"Invalid content type: {v}")
         raise TypeError(f"Expected string or ContentType, got {type(v)}")
-    
+
     @model_validator(mode="after")
     def validate_version(self) -> Self:
         """Ensure version meets minimum requirements."""
@@ -156,7 +154,7 @@ class ScrapeTarget(VersionedModel):
             patch=self.patch,
         )
         return self
-    
+
     @property
     def version(self) -> SpringVersion | None:
         """Get SpringVersion from target specification."""
@@ -168,20 +166,23 @@ class ScrapeTarget(VersionedModel):
             minor=self.minor,
             patch=self.patch,
         )
-    
+
     def s3_key_prefix_for(self, version: SpringVersion) -> str:
         """Generate S3 key prefix for this target and version."""
         version_str = f"{version.major}.{version.minor}.{version.patch}"
-        if self.submodule:
-            return f"{self.module.value}/{self.submodule}/{version_str}"
-        return f"{self.module.value}/{version_str}"
+        module_segment = (
+            f"{self.module.value}-{self.submodule}"
+            if self.submodule
+            else self.module.value
+        )
+        return f"{module_segment}/{version_str}"
 
 
 class PipelineConfig(BaseModel):
     """Configuration for ScraperPipeline.
-    
+
     Supports loading from environment variables for AWS Lambda.
-    
+
     Attributes:
         s3_bucket: S3 bucket name for content storage
         s3_prefix: Prefix for all S3 keys
@@ -190,20 +191,20 @@ class PipelineConfig(BaseModel):
         browser_config: Configuration for SpringBrowser
         parser_config: Configuration for SpringDocParser
     """
-    
+
     model_config = ConfigDict(frozen=True)
-    
+
     # Required environment variables for Lambda
     ENV_BUCKET: ClassVar[str] = "EVERSPRING_S3_BUCKET"
     ENV_PREFIX: ClassVar[str] = "EVERSPRING_S3_PREFIX"
     ENV_REGION: ClassVar[str] = "AWS_REGION"
-    
+
     s3_bucket: str = Field(
         pattern=r"^[a-z0-9][a-z0-9\-\.]{1,61}[a-z0-9]$",
         description="S3 bucket name",
     )
     s3_prefix: str = Field(
-        default="docs",
+        default="spring-docs/raw-data",
         description="S3 key prefix",
     )
     aws_region: str = Field(
@@ -222,40 +223,38 @@ class PipelineConfig(BaseModel):
         default_factory=ParserConfig,
         description="Parser configuration",
     )
-    
+
     @classmethod
     def from_env(cls) -> PipelineConfig:
         """Create configuration from environment variables.
-        
+
         Required environment variables:
         - EVERSPRING_S3_BUCKET: S3 bucket name
-        
+
         Optional environment variables:
-        - EVERSPRING_S3_PREFIX: S3 key prefix (default: "docs")
+        - EVERSPRING_S3_PREFIX: S3 key prefix (default: "spring-docs/raw-data")
         - AWS_REGION: AWS region (default: "us-east-1")
-        
+
         Returns:
             PipelineConfig from environment
-            
+
         Raises:
             ValueError: If required environment variables are missing
         """
         bucket = os.environ.get(cls.ENV_BUCKET)
         if not bucket:
-            raise ValueError(
-                f"Missing required environment variable: {cls.ENV_BUCKET}"
-            )
-        
+            raise ValueError(f"Missing required environment variable: {cls.ENV_BUCKET}")
+
         return cls(
             s3_bucket=bucket,
-            s3_prefix=os.environ.get(cls.ENV_PREFIX, "docs"),
+            s3_prefix=os.environ.get(cls.ENV_PREFIX, "spring-docs/raw-data"),
             aws_region=os.environ.get(cls.ENV_REGION, "us-east-1"),
         )
 
 
 class ScrapeResult(VersionedModel):
     """Result of a single scrape operation.
-    
+
     Attributes:
         target: Original scrape target
         status: Operation status
@@ -264,7 +263,7 @@ class ScrapeResult(VersionedModel):
         error_message: Error message if failed
         scraped_at: Timestamp of scraping
     """
-    
+
     target: ScrapeTarget = Field(
         description="Original scrape target",
     )
@@ -284,10 +283,10 @@ class ScrapeResult(VersionedModel):
         description="Error message if failed",
     )
     scraped_at: datetime = Field(
-        default_factory=lambda: datetime.now(timezone.utc),
+        default_factory=lambda: datetime.now(UTC),
         description="Timestamp of scraping",
     )
-    
+
     @classmethod
     def success(
         cls,
@@ -302,7 +301,7 @@ class ScrapeResult(VersionedModel):
             s3_ref=s3_ref,
             content_hash=content_hash,
         )
-    
+
     @classmethod
     def skipped(
         cls,
@@ -315,7 +314,7 @@ class ScrapeResult(VersionedModel):
             status=PipelineStatus.SKIPPED,
             content_hash=content_hash,
         )
-    
+
     @classmethod
     def failed(
         cls,
@@ -332,15 +331,15 @@ class ScrapeResult(VersionedModel):
 
 class S3Client:
     """Secure S3 client wrapper with IAM authentication.
-    
+
     Uses IAM role-based authentication (no hardcoded credentials).
     Lambda execution role provides necessary permissions.
-    
+
     Attributes:
         bucket: S3 bucket name
         prefix: Key prefix for all operations
     """
-    
+
     def __init__(
         self,
         bucket: str,
@@ -348,7 +347,7 @@ class S3Client:
         region: str = "us-east-1",
     ) -> None:
         """Initialize S3 client.
-        
+
         Args:
             bucket: S3 bucket name
             prefix: Key prefix for all operations
@@ -356,18 +355,18 @@ class S3Client:
         """
         self.bucket = bucket
         self.prefix = prefix.rstrip("/")
-        
+
         # Use IAM role - Lambda automatically uses execution role
         # No hardcoded credentials
         self._client = boto3.client("s3", region_name=region)
         logger.info(f"S3 client initialized for bucket: {bucket}")
-    
+
     def _full_key(self, key: str) -> str:
         """Get full S3 key with prefix."""
         if self.prefix:
             return f"{self.prefix}/{key.lstrip('/')}"
         return key.lstrip("/")
-    
+
     def upload_content(
         self,
         content: str,
@@ -376,16 +375,16 @@ class S3Client:
         metadata: dict[str, str] | None = None,
     ) -> S3ObjectRef:
         """Upload content to S3 with SHA-256 hash verification.
-        
+
         Args:
             content: Content to upload
             key: S3 object key (prefix will be added)
             content_hash: Pre-computed SHA-256 hash for verification
             metadata: Additional metadata to store
-            
+
         Returns:
             S3ObjectRef for uploaded object
-            
+
         Raises:
             ValueError: If content hash doesn't match computed hash
             ClientError: If S3 upload fails
@@ -396,19 +395,19 @@ class S3Client:
             raise ValueError(
                 f"Content hash mismatch: expected {content_hash}, got {computed_hash}"
             )
-        
+
         full_key = self._full_key(key)
         content_bytes = content.encode("utf-8")
-        
+
         # Build metadata
         s3_metadata = {
             "content-hash": content_hash,
             "schema-version": str(VersionedModel.CURRENT_SCHEMA_VERSION),
-            "uploaded-at": datetime.now(timezone.utc).isoformat(),
+            "uploaded-at": datetime.now(UTC).isoformat(),
         }
         if metadata:
             s3_metadata.update(metadata)
-        
+
         try:
             response = self._client.put_object(
                 Bucket=self.bucket,
@@ -417,22 +416,22 @@ class S3Client:
                 ContentType="text/markdown",
                 Metadata=s3_metadata,
             )
-            
+
             logger.info(f"Uploaded to s3://{self.bucket}/{full_key}")
-            
+
             return S3ObjectRef(
                 bucket=self.bucket,
                 key=full_key,
                 etag=response.get("ETag", "").strip('"'),
                 size_bytes=len(content_bytes),
                 content_hash=content_hash,
-                last_modified=datetime.now(timezone.utc),
+                last_modified=datetime.now(UTC),
             )
-            
+
         except ClientError as e:
             logger.error(f"S3 upload failed: {e}")
             raise
-    
+
     def upload_json(
         self,
         data: dict[str, Any] | BaseModel,
@@ -440,12 +439,12 @@ class S3Client:
         content_hash: str | None = None,
     ) -> S3ObjectRef:
         """Upload JSON data to S3.
-        
+
         Args:
             data: Dictionary or Pydantic model to upload
             key: S3 object key
             content_hash: Optional pre-computed hash
-            
+
         Returns:
             S3ObjectRef for uploaded object
         """
@@ -453,19 +452,19 @@ class S3Client:
             json_str = data.model_dump_json(indent=2)
         else:
             json_str = json.dumps(data, indent=2, default=str)
-        
+
         if content_hash is None:
             content_hash = compute_hash(json_str)
-        
+
         full_key = self._full_key(key)
         content_bytes = json_str.encode("utf-8")
-        
+
         s3_metadata = {
             "content-hash": content_hash,
             "content-type": "application/json",
             "schema-version": str(VersionedModel.CURRENT_SCHEMA_VERSION),
         }
-        
+
         try:
             response = self._client.put_object(
                 Bucket=self.bucket,
@@ -474,69 +473,87 @@ class S3Client:
                 ContentType="application/json",
                 Metadata=s3_metadata,
             )
-            
+
             logger.info(f"Uploaded JSON to s3://{self.bucket}/{full_key}")
-            
+
             return S3ObjectRef(
                 bucket=self.bucket,
                 key=full_key,
                 etag=response.get("ETag", "").strip('"'),
                 size_bytes=len(content_bytes),
                 content_hash=content_hash,
-                last_modified=datetime.now(timezone.utc),
+                last_modified=datetime.now(UTC),
             )
-            
+
         except ClientError as e:
             logger.error(f"S3 JSON upload failed: {e}")
             raise
-    
-    def get_content_hash(self, key: str) -> str | None:
-        """Get content hash from S3 object metadata.
-        
-        Used for incremental sync - skip upload if hash matches.
-        
+
+    def get_object_metadata(self, key: str) -> dict[str, str] | None:
+        """Get object metadata from S3.
+
         Args:
             key: S3 object key
-            
+
         Returns:
-            Content hash if exists, None otherwise
+            Metadata dictionary if object exists, otherwise None
         """
         full_key = self._full_key(key)
-        
+
         try:
             response = self._client.head_object(
                 Bucket=self.bucket,
                 Key=full_key,
             )
-            return response.get("Metadata", {}).get("content-hash")
-            
+            metadata = response.get("Metadata", {})
+            if isinstance(metadata, dict):
+                return {str(k): str(v) for k, v in metadata.items()}
+            return {}
+
         except ClientError as e:
             error_code = e.response.get("Error", {}).get("Code")
             if error_code == "404":
                 return None
             logger.error(f"Failed to get object metadata: {e}")
             raise
-    
+
+    def get_content_hash(self, key: str) -> str | None:
+        """Get content hash from S3 object metadata.
+
+        Used for incremental sync - skip upload if hash matches.
+        """
+        metadata = self.get_object_metadata(key)
+        if metadata is None:
+            return None
+        return metadata.get("content-hash")
+
+    def get_precheck_hash(self, key: str) -> str | None:
+        """Get fast-precheck hash stored in object metadata."""
+        metadata = self.get_object_metadata(key)
+        if metadata is None:
+            return None
+        return metadata.get("precheck-hash")
+
     def check_exists(self, key: str) -> bool:
         """Check if S3 object exists.
-        
+
         Args:
             key: S3 object key
-            
+
         Returns:
             True if object exists
         """
         return self.get_content_hash(key) is not None
-    
+
     def should_upload(self, key: str, content_hash: str) -> bool:
         """Check if content should be uploaded (hash changed).
-        
+
         Implements incremental sync logic to minimize S3 operations.
-        
+
         Args:
             key: S3 object key
             content_hash: New content hash
-            
+
         Returns:
             True if upload needed (new or changed content)
         """
@@ -549,18 +566,18 @@ class S3Client:
             return True
         logger.debug(f"Hash unchanged for {key}, skipping upload")
         return False
-    
+
     def download_manifest(self, key: str) -> SyncManifest | None:
         """Download sync manifest from S3.
-        
+
         Args:
             key: S3 object key for manifest
-            
+
         Returns:
             SyncManifest if exists, None otherwise
         """
         full_key = self._full_key(key)
-        
+
         try:
             response = self._client.get_object(
                 Bucket=self.bucket,
@@ -568,7 +585,7 @@ class S3Client:
             )
             body = response["Body"].read().decode("utf-8")
             return SyncManifest.model_validate_json(body)
-            
+
         except ClientError as e:
             error_code = e.response.get("Error", {}).get("Code")
             if error_code == "NoSuchKey":
@@ -579,14 +596,14 @@ class S3Client:
 
 class ScraperPipeline:
     """Orchestration class for scraping pipeline.
-    
+
     Coordinates browser navigation, HTML parsing, hash checking,
     and S3 upload for Spring documentation scraping.
-    
+
     Usage:
         config = PipelineConfig.from_env()
         pipeline = ScraperPipeline(config)
-        
+
         target = ScrapeTarget(
             url="https://docs.spring.io/spring-boot/docs/current/reference/html/",
             module=SpringModule.BOOT,
@@ -594,10 +611,10 @@ class ScraperPipeline:
         )
         result = await pipeline.scrape_url(target)
     """
-    
+
     def __init__(self, config: PipelineConfig) -> None:
         """Initialize pipeline with configuration.
-        
+
         Args:
             config: Pipeline configuration
         """
@@ -609,16 +626,15 @@ class ScraperPipeline:
         )
         self._parser = SpringDocParser(config.parser_config)
         logger.info("ScraperPipeline initialized")
-    
-    def _generate_s3_key(self, target: ScrapeTarget, content_hash: str) -> str:
+
+    def _generate_s3_key(self, target: ScrapeTarget) -> str:
         """Generate S3 key for scraped content.
-        
-        Format: {module}/{submodule?}/{version}/{url_hash}.md
-        
+
+        Format: {module[-submodule]}/{version}/{url_hash}/document.md
+
         Args:
             target: Scrape target
-            content_hash: Content hash (first 8 chars used in key)
-            
+
         Returns:
             S3 object key
         """
@@ -626,46 +642,77 @@ class ScraperPipeline:
         url_hash = compute_hash(target.url)[:16]
         if not target.version:
             raise ValueError("Target version is required for S3 key generation")
-        return f"{target.s3_key_prefix_for(target.version)}/{url_hash}.md"
-    
+        return f"{target.s3_key_prefix_for(target.version)}/{url_hash}/document.md"
+
     def _generate_metadata_key(self, target: ScrapeTarget) -> str:
         """Generate S3 key for scraped page metadata.
-        
+
         Args:
             target: Scrape target
-            
+
         Returns:
             S3 object key for metadata JSON
         """
         url_hash = compute_hash(target.url)[:16]
         if not target.version:
             raise ValueError("Target version is required for metadata key generation")
-        return f"{target.s3_key_prefix_for(target.version)}/metadata/{url_hash}.json"
-    
+        return f"{target.s3_key_prefix_for(target.version)}/{url_hash}/metadata.json"
+
     async def scrape_url(self, target: ScrapeTarget) -> ScrapeResult:
         """Scrape single URL and upload to S3.
-        
+
         Pipeline: Browse → Parse → Hash Check → S3 Upload
-        
+
         Args:
             target: Scrape target specification
-            
+
         Returns:
             ScrapeResult with operation status
         """
         logger.info(f"Scraping: {target.url}")
-        
+
         try:
+            s3_key: str | None = None
+            stored_content_hash: str | None = None
+            stored_precheck_hash: str | None = None
+            fast_precheck_hash: str | None = None
+
+                # Preload stored hashes for fast no-change detection when version is known.
+            if self.config.enable_hash_check and target.version is not None:
+                # Key is URL-derived from target URL + normalized module/version path.
+                s3_key = self._generate_s3_key(target)
+                existing_metadata = self._s3.get_object_metadata(s3_key)
+                if existing_metadata:
+                    stored_content_hash = existing_metadata.get("content-hash")
+                    stored_precheck_hash = existing_metadata.get("precheck-hash")
+
             # Step 1: Browse - Navigate and get HTML
             async with SpringBrowser(self.config.browser_config) as browser:
+                not_modified_signal = await browser.fast_precheck(
+                    target.url,
+                    stored_hash=stored_precheck_hash,
+                )
+                fast_precheck_hash = browser.last_precheck_hash
+                if isinstance(not_modified_signal, NotModifiedSignal):
+                    logger.info(
+                        "Fast precheck reported unchanged content: %s", target.url
+                    )
+                    return ScrapeResult.skipped(
+                        target,
+                        stored_content_hash or not_modified_signal.content_hash,
+                    )
+
                 await browser.navigate_with_retry(target.url)
                 raw_html = await browser.get_html()
-            
+
             logger.debug(f"Retrieved HTML: {len(raw_html)} chars")
-            
+
             # Step 2: Parse - Convert to ScrapedPage model
             parser = self._parser
-            if target.version_selector != self.config.parser_config.version_selectors[0]:
+            if (
+                target.version_selector
+                != self.config.parser_config.version_selectors[0]
+            ):
                 parser = SpringDocParser(
                     self.config.parser_config.model_copy(
                         update={"version_selectors": [target.version_selector]}
@@ -679,7 +726,10 @@ class ScraperPipeline:
                 submodule=target.submodule,
                 content_type=target.content_type,
             )
-            if target.version_selector != self.config.parser_config.version_selectors[0]:
+            if (
+                target.version_selector
+                != self.config.parser_config.version_selectors[0]
+            ):
                 logger.debug(
                     "Target version selector override in use: %s",
                     target.version_selector,
@@ -697,30 +747,35 @@ class ScraperPipeline:
                     f"Version mismatch: expected {target.version.version_string}, got {scraped_page.version.version_string}",
                     url=target.url,
                 )
-            
+
             content_hash = scraped_page.content_hash
-            s3_key = self._generate_s3_key(target, content_hash)
-            
+            if s3_key is None:
+                s3_key = self._generate_s3_key(target)
+
             # Step 3: Hash Check - Skip if unchanged
             if self.config.enable_hash_check:
                 if not self._s3.should_upload(s3_key, content_hash):
                     logger.info(f"Content unchanged, skipping: {target.url}")
                     return ScrapeResult.skipped(target, content_hash)
-            
+
             # Step 4: S3 Upload - Upload markdown content
+            upload_metadata = {
+                "source-url": target.url,
+                "module": target.module.value,
+                "version": scraped_page.version.version_string,
+                "title": scraped_page.title[:256],  # Limit metadata size
+                "submodule": target.submodule or "",
+            }
+            if isinstance(fast_precheck_hash, str) and fast_precheck_hash:
+                upload_metadata["precheck-hash"] = fast_precheck_hash
+
             s3_ref = self._s3.upload_content(
                 content=scraped_page.markdown_content,
                 key=s3_key,
                 content_hash=content_hash,
-                metadata={
-                    "source-url": target.url,
-                    "module": target.module.value,
-                    "version": scraped_page.version.version_string,
-                    "title": scraped_page.title[:256],  # Limit metadata size
-                    "submodule": target.submodule or "",
-                },
+                metadata=upload_metadata,
             )
-            
+
             # Upload metadata JSON
             metadata_key = self._generate_metadata_key(target)
             self._s3.upload_json(
@@ -730,10 +785,10 @@ class ScraperPipeline:
                 ),
                 key=metadata_key,
             )
-            
+
             logger.info(f"Successfully scraped and uploaded: {target.url}")
             return ScrapeResult.success(target, s3_ref, content_hash)
-            
+
         except (NavigationError, RateLimitError, ContentExtractionError) as e:
             logger.error(f"Scraping failed for {target.url}: {e}")
             return ScrapeResult.failed(target, str(e))
@@ -743,58 +798,62 @@ class ScraperPipeline:
         except Exception as e:
             logger.exception(f"Unexpected error scraping {target.url}")
             return ScrapeResult.failed(target, f"Unexpected error: {e}")
-    
+
     async def process_batch(
         self,
         targets: list[ScrapeTarget],
         concurrency: int = 3,
     ) -> list[ScrapeResult]:
         """Process multiple scrape targets with controlled concurrency.
-        
+
         Args:
             targets: List of scrape targets
             concurrency: Maximum concurrent scrapes
-            
+
         Returns:
             List of ScrapeResult for each target
         """
         if not targets:
             return []
-        
+
         logger.info(f"Processing batch of {len(targets)} targets")
-        
+
         # Use semaphore for concurrency control
         semaphore = asyncio.Semaphore(concurrency)
-        
+
         async def scrape_with_semaphore(target: ScrapeTarget) -> ScrapeResult:
             async with semaphore:
                 return await self.scrape_url(target)
-        
+
         tasks = [scrape_with_semaphore(target) for target in targets]
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        
+
         # Convert exceptions to failed results
         processed_results: list[ScrapeResult] = []
         for target, result in zip(targets, results):
             if isinstance(result, Exception):
-                processed_results.append(
-                    ScrapeResult.failed(target, str(result))
-                )
+                processed_results.append(ScrapeResult.failed(target, str(result)))
             else:
                 processed_results.append(result)
-        
+
         # Log summary
-        success_count = sum(1 for r in processed_results if r.status == PipelineStatus.SUCCESS)
-        skipped_count = sum(1 for r in processed_results if r.status == PipelineStatus.SKIPPED)
-        failed_count = sum(1 for r in processed_results if r.status == PipelineStatus.FAILED)
-        
+        success_count = sum(
+            1 for r in processed_results if r.status == PipelineStatus.SUCCESS
+        )
+        skipped_count = sum(
+            1 for r in processed_results if r.status == PipelineStatus.SKIPPED
+        )
+        failed_count = sum(
+            1 for r in processed_results if r.status == PipelineStatus.FAILED
+        )
+
         logger.info(
             f"Batch complete: {success_count} success, "
             f"{skipped_count} skipped, {failed_count} failed"
         )
-        
+
         return processed_results
-    
+
     async def discover_and_scrape(
         self,
         entry_url: str | None,
@@ -805,24 +864,23 @@ class ScraperPipeline:
         submodule: str | None = None,
     ) -> tuple[DiscoveryResult, list[ScrapeResult]]:
         """Discover and scrape all documentation pages.
-        
+
         Combines discovery and scraping into a single operation:
         1. Discover all URLs from entry point
         2. Convert to ScrapeTargets
         3. Process batch scraping
-        
+
         Args:
             entry_url: Starting URL for discovery
             module: Spring module
             version: Spring version
             content_type: Documentation type for all pages
             concurrency: Maximum concurrent scrapes
-            
+
         Returns:
             Tuple of (DiscoveryResult, list of ScrapeResult)
         """
-        from .discovery import SpringDocDiscovery, DiscoveryConfig
-        
+
         if entry_url and module and version:
             return await self._discover_and_scrape_target(
                 entry_url=entry_url,
@@ -850,17 +908,17 @@ class ScraperPipeline:
         concurrency: int,
         submodule: str | None,
     ) -> tuple[DiscoveryResult, list[ScrapeResult]]:
-        from .discovery import SpringDocDiscovery, DiscoveryConfig
-        
+        from .discovery import DiscoveryConfig, SpringDocDiscovery
+
         logger.info(f"Starting discover_and_scrape from: {entry_url}")
-        
+
         # Create discovery with same browser config
         discovery_config = DiscoveryConfig(
             browser_config=self.config.browser_config,
             parser_config=self.config.parser_config,
         )
         discovery = SpringDocDiscovery(discovery_config)
-        
+
         # Run discovery
         discovery_result = await discovery.discover(
             entry_url,
@@ -868,23 +926,25 @@ class ScraperPipeline:
             version,
             content_type=content_type,
         )
-        
+
         if discovery_result.link_count == 0:
             logger.warning("No links discovered, nothing to scrape")
             return discovery_result, []
-        
-        logger.info(f"Discovered {discovery_result.link_count} links, starting batch scrape")
-        
+
+        logger.info(
+            f"Discovered {discovery_result.link_count} links, starting batch scrape"
+        )
+
         # Convert to targets
         targets = discovery_result.to_scrape_targets(
             content_type,
             submodule=submodule,
             auto_version=content_type != ContentType.API_DOC,
         )
-        
+
         # Run batch scraping
         scrape_results = await self.process_batch(targets, concurrency)
-        
+
         return discovery_result, scrape_results
 
     async def _discover_and_scrape_registry(
@@ -966,7 +1026,7 @@ class ScraperPipeline:
 
 def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     """AWS Lambda entry point for scraper pipeline.
-    
+
     Event format:
     {
         "targets": [
@@ -980,7 +1040,7 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         ],
         "concurrency": 3  // optional
     }
-    
+
     Response format:
     {
         "statusCode": 200,
@@ -996,23 +1056,23 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
             ]
         }
     }
-    
+
     Args:
         event: Lambda event with targets array
         context: Lambda context (unused)
-        
+
     Returns:
         Lambda response with status and results
     """
     # Configure centralized logging for Lambda entrypoint usage.
     setup_logging(level="INFO", console=True, file=True, name="scraper")
-    
+
     logger.info(f"Lambda invoked with event: {json.dumps(event, default=str)[:500]}")
-    
+
     try:
         # Load configuration from environment
         config = PipelineConfig.from_env()
-        
+
         # Parse targets from event
         raw_targets = event.get("targets", [])
         if not raw_targets:
@@ -1020,47 +1080,49 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
                 "statusCode": 400,
                 "body": {"error": "No targets provided in event"},
             }
-        
+
         targets: list[ScrapeTarget] = []
         for raw in raw_targets:
             try:
                 targets.append(ScrapeTarget(**raw))
             except Exception as e:
                 logger.warning(f"Invalid target: {raw} - {e}")
-        
+
         if not targets:
             return {
                 "statusCode": 400,
                 "body": {"error": "No valid targets after parsing"},
             }
-        
+
         # Get concurrency from event (default: 3)
         concurrency = event.get("concurrency", 3)
-        
+
         # Run pipeline
         pipeline = ScraperPipeline(config)
         results = asyncio.run(pipeline.process_batch(targets, concurrency))
-        
+
         # Format response
         response_results = []
         for result in results:
-            response_results.append({
-                "url": result.target.url,
-                "status": result.status.value,
-                "s3_key": result.s3_ref.key if result.s3_ref else None,
-                "content_hash": result.content_hash,
-                "error": result.error_message,
-            })
-        
+            response_results.append(
+                {
+                    "url": result.target.url,
+                    "status": result.status.value,
+                    "s3_key": result.s3_ref.key if result.s3_ref else None,
+                    "content_hash": result.content_hash,
+                    "error": result.error_message,
+                }
+            )
+
         # Count statuses
         status_counts = {
             "success": sum(1 for r in results if r.status == PipelineStatus.SUCCESS),
             "skipped": sum(1 for r in results if r.status == PipelineStatus.SKIPPED),
             "failed": sum(1 for r in results if r.status == PipelineStatus.FAILED),
         }
-        
+
         logger.info(f"Pipeline complete: {status_counts}")
-        
+
         return {
             "statusCode": 200,
             "body": {
@@ -1069,7 +1131,7 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
                 "results": response_results,
             },
         }
-        
+
     except ValueError as e:
         logger.error(f"Configuration error: {e}")
         return {
@@ -1088,16 +1150,16 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
 if __name__ == "__main__":
     # Example usage for local testing
     import sys
-    
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
         handlers=[
             logging.FileHandler("everspring_scraper.log"),
-            logging.StreamHandler(sys.stdout)
-        ]
+            logging.StreamHandler(sys.stdout),
+        ],
     )
-    
+
     # Test event
     test_event = {
         "targets": [
@@ -1108,12 +1170,12 @@ if __name__ == "__main__":
             }
         ]
     }
-    
+
     # Ensure environment variables are set
     if not os.environ.get("EVERSPRING_S3_BUCKET"):
         print("Error: EVERSPRING_S3_BUCKET environment variable not set")
         sys.exit(1)
-    
+
     result = lambda_handler(test_event, None)
     print(json.dumps(result, indent=2, default=str))
 

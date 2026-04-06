@@ -19,12 +19,15 @@ from .base import (
     validate_sha256_hash,
 )
 from .content import (
+    ApiClassSignature,
     CodeExample,
     CodeLanguage,
     ContentType,
     DeprecationInfo,
     DeprecationStatus,
     DocumentSection,
+    MethodParameter,
+    MethodSignature,
     ScrapedPage,
 )
 from .metadata import (
@@ -69,6 +72,9 @@ __all__ = [
     "DeprecationStatus",
     "DeprecationInfo",
     "CodeExample",
+    "MethodParameter",
+    "MethodSignature",
+    "ApiClassSignature",
     "DocumentSection",
     "ScrapedPage",
     # Metadata

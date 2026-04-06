@@ -11,31 +11,38 @@ for scraping Spring documentation with:
 from __future__ import annotations
 
 import asyncio
+import logging
 import random
+import re
 import time
 from typing import Self
 
+import httpx
+from bs4 import BeautifulSoup, Tag
 from playwright.async_api import (
     Browser,
     BrowserContext,
-    Error as PlaywrightError,
     Page,
     Playwright,
     Response,
-    TimeoutError as PlaywrightTimeoutError,
     async_playwright,
+)
+from playwright.async_api import (
+    Error as PlaywrightError,
+)
+from playwright.async_api import (
+    TimeoutError as PlaywrightTimeoutError,
 )
 from pydantic import BaseModel, ConfigDict, Field
 from tenacity import (
-    AsyncRetrying,
+    before_sleep_log,
+    retry,
     retry_if_exception_type,
     stop_after_attempt,
     wait_exponential,
-    before_sleep_log,
-    retry,
 )
-import logging
 
+from everspring_mcp.models.base import compute_hash
 from everspring_mcp.scraper.exceptions import (
     BrowserLaunchError,
     ContentExtractionError,
@@ -63,10 +70,20 @@ USER_AGENTS: list[str] = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0",
 ]
 
+# Fast-path regex extraction for core content blocks before Playwright rendering.
+MAIN_CONTENT_REGEX = re.compile(
+    r"<main\b[^>]*>(?P<content>.*?)</main>",
+    re.IGNORECASE | re.DOTALL,
+)
+DOC_CONTENT_REGEX = re.compile(
+    r"<div\b[^>]*class=(?P<quote>['\"])[^'\"]*\bdoc\b[^'\"]*(?P=quote)[^>]*>(?P<content>.*?)</div>",
+    re.IGNORECASE | re.DOTALL,
+)
+
 
 class BrowserConfig(BaseModel):
     """Configuration for SpringBrowser.
-    
+
     Attributes:
         headless: Run browser in headless mode (default: True)
         timeout_ms: Default timeout for operations in milliseconds
@@ -76,9 +93,9 @@ class BrowserConfig(BaseModel):
         base_retry_delay: Base delay for exponential backoff (seconds)
         rate_limit_delay: Delay when rate limited (seconds)
     """
-    
+
     model_config = ConfigDict(frozen=True)
-    
+
     headless: bool = Field(
         default=True,
         description="Run browser in headless mode",
@@ -119,26 +136,53 @@ class BrowserConfig(BaseModel):
         le=300.0,
         description="Delay when rate limited (seconds)",
     )
+    enable_fast_precheck: bool = Field(
+        default=True,
+        description="Enable lightweight HTTP hash precheck before Playwright rendering",
+    )
+    fast_precheck_timeout_ms: int = Field(
+        default=5000,
+        ge=500,
+        le=30000,
+        description="HTTP precheck timeout in milliseconds",
+    )
+
+
+class NotModifiedSignal(BaseModel):
+    """Signal returned when fast precheck detects unchanged content."""
+
+    model_config = ConfigDict(frozen=True)
+
+    signal: str = Field(
+        default="NotModified",
+        description="Signal marker for unchanged content",
+    )
+    url: str = Field(
+        description="Checked URL",
+    )
+    content_hash: str = Field(
+        description="SHA-256 hash from precheck content extraction",
+    )
 
 
 class SpringBrowser:
     """Async browser for scraping Spring documentation.
-    
+
     Uses Playwright to handle JavaScript-rendered content with
     user-agent rotation, retry logic, and comprehensive error handling.
-    
+
     Usage:
         async with SpringBrowser() as browser:
             await browser.navigate("https://docs.spring.io/...")
             html = await browser.get_html()
-    
+
     Attributes:
         config: Browser configuration settings
     """
-    
+
     def __init__(self, config: BrowserConfig | None = None) -> None:
         """Initialize SpringBrowser.
-        
+
         Args:
             config: Browser configuration. Uses defaults if not provided.
         """
@@ -148,12 +192,13 @@ class SpringBrowser:
         self._context: BrowserContext | None = None
         self._page: Page | None = None
         self._current_url: str | None = None
-    
+        self._last_precheck_hash: str | None = None
+
     async def __aenter__(self) -> Self:
         """Enter async context and launch browser."""
         await self._launch()
         return self
-    
+
     async def __aexit__(
         self,
         exc_type: type[BaseException] | None,
@@ -162,7 +207,7 @@ class SpringBrowser:
     ) -> None:
         """Exit async context and close browser."""
         await self._close()
-    
+
     async def _launch(self) -> None:
         """Launch browser and create initial context."""
         try:
@@ -175,7 +220,7 @@ class SpringBrowser:
             logger.info(f"Browser launched in {time.perf_counter() - start:.2f}s")
         except PlaywrightError as e:
             raise BrowserLaunchError(f"Failed to launch browser: {e}") from e
-    
+
     async def _close(self) -> None:
         """Close browser and cleanup resources."""
         if self._page:
@@ -191,12 +236,12 @@ class SpringBrowser:
             await self._playwright.stop()
             self._playwright = None
         logger.info("Browser closed")
-    
+
     async def _create_context(self) -> None:
         """Create browser context with rotated user agent."""
         if not self._browser:
             raise BrowserLaunchError("Browser not launched")
-        
+
         user_agent = self._get_user_agent()
         self._context = await self._browser.new_context(
             user_agent=user_agent,
@@ -208,10 +253,10 @@ class SpringBrowser:
         self._page = await self._context.new_page()
         self._page.set_default_timeout(self.config.timeout_ms)
         logger.debug(f"Created context with user agent: {user_agent[:50]}...")
-    
+
     async def _rotate_context(self) -> None:
         """Rotate to new browser context with different user agent.
-        
+
         Useful when encountering rate limits or for stealth.
         """
         if self._page:
@@ -220,13 +265,102 @@ class SpringBrowser:
             await self._context.close()
         await self._create_context()
         logger.info("Rotated browser context with new user agent")
-    
+
     def _get_user_agent(self) -> str:
         """Get random user agent from pool."""
         return random.choice(USER_AGENTS)
-    
+
+    @staticmethod
+    def _normalize_extracted_content(content: str) -> str:
+        """Normalize whitespace for stable hash comparisons."""
+        return re.sub(r"\s+", " ", content).strip()
+
+    @classmethod
+    def extract_core_content(cls, html: str) -> str | None:
+        """Extract core page content quickly using regex then minimal BeautifulSoup."""
+        for pattern in (MAIN_CONTENT_REGEX, DOC_CONTENT_REGEX):
+            match = pattern.search(html)
+            if not match:
+                continue
+            extracted = cls._normalize_extracted_content(match.group("content"))
+            if extracted:
+                return extracted
+
+        soup = BeautifulSoup(html, "lxml")
+        node = soup.select_one("main, div.doc, article.doc, main.content, #content")
+        if node and isinstance(node, Tag):
+            extracted = cls._normalize_extracted_content(node.get_text(" ", strip=True))
+            if extracted:
+                return extracted
+
+        body = soup.body
+        if body and isinstance(body, Tag):
+            extracted = cls._normalize_extracted_content(body.get_text(" ", strip=True))
+            return extracted or None
+
+        return None
+
+    @classmethod
+    def compute_core_content_hash(cls, html: str) -> str | None:
+        """Compute SHA-256 hash from extracted core content."""
+        extracted = cls.extract_core_content(html)
+        if not extracted:
+            return None
+        return compute_hash(extracted)
+
+    async def fast_precheck(
+        self,
+        url: str,
+        stored_hash: str | None = None,
+    ) -> NotModifiedSignal | None:
+        """Run lightweight async HTTP precheck before Playwright navigation.
+
+        This fetches the URL via httpx, extracts the main content area, computes
+        SHA-256, and compares against a stored hash. If equal, returns a
+        NotModified signal so callers can skip expensive Playwright rendering.
+        """
+        self._last_precheck_hash = None
+        if not self.config.enable_fast_precheck:
+            return None
+
+        timeout_seconds = self.config.fast_precheck_timeout_ms / 1000
+        headers = {"User-Agent": self._get_user_agent()}
+
+        try:
+            async with httpx.AsyncClient(
+                follow_redirects=True,
+                timeout=timeout_seconds,
+            ) as client:
+                response = await client.get(url, headers=headers)
+                if response.status_code >= 400:
+                    logger.debug(
+                        "Fast precheck skipped for %s due to HTTP %s",
+                        url,
+                        response.status_code,
+                    )
+                    return None
+
+                content_hash = self.compute_core_content_hash(response.text)
+                self._last_precheck_hash = content_hash
+                if not content_hash:
+                    return None
+
+                if stored_hash and content_hash == stored_hash:
+                    logger.info(
+                        "Fast precheck matched stored hash; skipping Playwright for %s",
+                        url,
+                    )
+                    return NotModifiedSignal(url=url, content_hash=content_hash)
+
+        except httpx.HTTPError as exc:
+            logger.debug("Fast precheck failed for %s: %s", url, exc)
+
+        return None
+
     @retry(
-        retry=retry_if_exception_type((NavigationTimeoutError, PlaywrightTimeoutError, PlaywrightError)),
+        retry=retry_if_exception_type(
+            (NavigationTimeoutError, PlaywrightTimeoutError, PlaywrightError)
+        ),
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=1, max=10),
         before_sleep=before_sleep_log(logger, logging.WARNING),
@@ -234,18 +368,18 @@ class SpringBrowser:
     )
     async def navigate(self, url: str) -> Response:
         """Navigate to URL and wait for network idle.
-        
+
         Uses tenacity for automatic retry with exponential backoff on:
         - Playwright timeouts
         - Network errors
         - Navigation failures
-        
+
         Args:
             url: URL to navigate to
-            
+
         Returns:
             Response object from navigation
-            
+
         Raises:
             NavigationTimeoutError: If navigation times out after retries
             RateLimitError: If rate limited (HTTP 429) - no retry
@@ -253,20 +387,20 @@ class SpringBrowser:
         """
         if not self._page:
             raise BrowserLaunchError("Browser not launched")
-        
+
         self._current_url = url
         logger.debug(f"Navigating to: {url}")
-        
+
         try:
             response = await self._page.goto(
                 url,
                 wait_until="networkidle",
                 timeout=self.config.timeout_ms,
             )
-            
+
             if response is None:
                 raise NavigationError("No response received", url=url)
-            
+
             # Check for rate limiting (don't retry, raise immediately)
             if response.status == 429:
                 retry_after = response.headers.get("retry-after")
@@ -276,7 +410,7 @@ class SpringBrowser:
                     url=url,
                     retry_after=retry_seconds,
                 )
-            
+
             # Check for other HTTP errors
             if response.status >= 400:
                 raise NavigationError(
@@ -284,10 +418,10 @@ class SpringBrowser:
                     url=url,
                     status_code=response.status,
                 )
-            
+
             logger.info(f"Navigation successful: {response.status}")
             return response
-            
+
         except PlaywrightTimeoutError as e:
             raise NavigationTimeoutError(
                 f"Timeout navigating to {url}",
@@ -296,69 +430,103 @@ class SpringBrowser:
             ) from e
         except PlaywrightError as e:
             raise NavigationError(f"Navigation failed: {e}", url=url) from e
-    
+
     async def navigate_with_retry(
         self,
         url: str,
         max_retries: int | None = None,
     ) -> Response:
         """Navigate to URL with retry, exponential backoff, and rate limit handling.
-        
+
         This method adds special handling for rate limits on top of the base
         navigate() method's retry logic. When rate limited:
         - Waits for server-specified retry-after time
         - Rotates browser context (new user agent)
         - Retries the request
-        
+
         Args:
             url: URL to navigate to
             max_retries: Override default max retries (for rate limits)
-            
+
         Returns:
             Response object from navigation
-            
+
         Raises:
             RateLimitError: If rate limited after all retries
             NavigationTimeoutError: If navigation times out after retries
             NavigationError: For other persistent failures
         """
         retries = max_retries or self.config.max_retries
-        
-        async for attempt in AsyncRetrying(
-            retry=retry_if_exception_type(RateLimitError),
-            stop=stop_after_attempt(retries),
-            wait=wait_exponential(multiplier=1, min=1, max=60),
-            before_sleep=before_sleep_log(logger, logging.WARNING),
-            reraise=True,
-        ):
-            with attempt:
-                try:
-                    return await self.navigate(url)
-                except RateLimitError as e:
-                    # Handle rate limiting with context rotation
-                    wait_time = e.retry_after or self.config.rate_limit_delay
-                    logger.warning(
-                        f"Rate limited, rotating context and waiting {wait_time}s before retry"
-                    )
-                    await asyncio.sleep(wait_time)
-                    await self._rotate_context()
-                    raise  # Re-raise to trigger tenacity retry
-        
-        # Should never reach here due to reraise=True
+        attempt = 0
+        while attempt < retries:
+            attempt += 1
+            try:
+                return await self.navigate(url)
+            except RateLimitError as e:
+                if attempt >= retries:
+                    raise
+                wait_time = e.retry_after or self.config.rate_limit_delay
+                logger.warning(
+                    "Rate limited, rotating context and waiting %.1fs before retry (%d/%d)",
+                    wait_time,
+                    attempt,
+                    retries,
+                )
+                await asyncio.sleep(wait_time)
+                await self._rotate_context()
+            except NavigationError as e:
+                if not self._is_transient_navigation_error(e) or attempt >= retries:
+                    raise
+                wait_time = self._transient_backoff_delay(attempt)
+                logger.warning(
+                    "Transient navigation failure, rotating context and retrying in %.2fs (%d/%d): %s",
+                    wait_time,
+                    attempt,
+                    retries,
+                    e,
+                )
+                await asyncio.sleep(wait_time)
+                await self._rotate_context()
+
         raise NavigationError("Unexpected retry state", url=url)
-    
+
+    def _is_transient_navigation_error(self, error: NavigationError) -> bool:
+        """Detect whether a navigation error is likely transient and retryable."""
+        if error.status_code in {408, 425, 429, 500, 502, 503, 504, 522, 523, 524}:
+            return True
+
+        message = str(error).upper()
+        transient_markers = (
+            "ERR_NAME_NOT_RESOLVED",
+            "ERR_CONNECTION_RESET",
+            "ERR_CONNECTION_CLOSED",
+            "ERR_CONNECTION_TIMED_OUT",
+            "ERR_CONNECTION_REFUSED",
+            "ERR_NETWORK_CHANGED",
+            "ERR_INTERNET_DISCONNECTED",
+            "DNS_PROBE_FINISHED",
+            "TEMPORARY_FAILURE",
+        )
+        return any(marker in message for marker in transient_markers)
+
+    def _transient_backoff_delay(self, attempt: int) -> float:
+        """Compute exponential backoff with jitter for transient navigation retries."""
+        base = self.config.base_retry_delay * (2 ** max(0, attempt - 1))
+        jitter = random.uniform(0.0, self.config.base_retry_delay)
+        return min(60.0, base + jitter)
+
     async def get_html(self) -> str:
         """Get full page HTML content.
-        
+
         Returns:
             Complete HTML content of current page
-            
+
         Raises:
             ContentExtractionError: If content cannot be extracted
         """
         if not self._page:
             raise BrowserLaunchError("Browser not launched")
-        
+
         try:
             content = await self._page.content()
             if not content:
@@ -373,22 +541,22 @@ class SpringBrowser:
                 f"Failed to extract HTML: {e}",
                 url=self._current_url,
             ) from e
-    
+
     async def get_content(self, selector: str) -> str:
         """Get text content of element matching selector.
-        
+
         Args:
             selector: CSS selector for element
-            
+
         Returns:
             Text content of matched element
-            
+
         Raises:
             ContentExtractionError: If element not found or extraction fails
         """
         if not self._page:
             raise BrowserLaunchError("Browser not launched")
-        
+
         try:
             element = await self._page.query_selector(selector)
             if not element:
@@ -397,7 +565,7 @@ class SpringBrowser:
                     url=self._current_url,
                     selector=selector,
                 )
-            
+
             content = await element.text_content()
             if content is None:
                 raise ContentExtractionError(
@@ -405,31 +573,31 @@ class SpringBrowser:
                     url=self._current_url,
                     selector=selector,
                 )
-            
+
             return content
-            
+
         except PlaywrightError as e:
             raise ContentExtractionError(
                 f"Failed to extract content: {e}",
                 url=self._current_url,
                 selector=selector,
             ) from e
-    
+
     async def get_inner_html(self, selector: str) -> str:
         """Get inner HTML of element matching selector.
-        
+
         Args:
             selector: CSS selector for element
-            
+
         Returns:
             Inner HTML of matched element
-            
+
         Raises:
             ContentExtractionError: If element not found or extraction fails
         """
         if not self._page:
             raise BrowserLaunchError("Browser not launched")
-        
+
         try:
             element = await self._page.query_selector(selector)
             if not element:
@@ -438,34 +606,34 @@ class SpringBrowser:
                     url=self._current_url,
                     selector=selector,
                 )
-            
+
             html = await element.inner_html()
             return html
-            
+
         except PlaywrightError as e:
             raise ContentExtractionError(
                 f"Failed to extract inner HTML: {e}",
                 url=self._current_url,
                 selector=selector,
             ) from e
-    
+
     async def wait_for_selector(
         self,
         selector: str,
         timeout_ms: int | None = None,
     ) -> None:
         """Wait for element matching selector to appear.
-        
+
         Args:
             selector: CSS selector to wait for
             timeout_ms: Override default timeout
-            
+
         Raises:
             NavigationTimeoutError: If element doesn't appear in time
         """
         if not self._page:
             raise BrowserLaunchError("Browser not launched")
-        
+
         try:
             await self._page.wait_for_selector(
                 selector,
@@ -477,12 +645,17 @@ class SpringBrowser:
                 url=self._current_url,
                 timeout_ms=timeout_ms or self.config.timeout_ms,
             ) from e
-    
+
     @property
     def current_url(self) -> str | None:
         """Get current page URL."""
         return self._current_url
-    
+
+    @property
+    def last_precheck_hash(self) -> str | None:
+        """Get the latest hash produced by fast_precheck (if any)."""
+        return self._last_precheck_hash
+
     @property
     def is_launched(self) -> bool:
         """Check if browser is launched and ready."""
@@ -491,6 +664,7 @@ class SpringBrowser:
 
 __all__ = [
     "BrowserConfig",
+    "NotModifiedSignal",
     "SpringBrowser",
     "USER_AGENTS",
 ]

@@ -147,17 +147,23 @@ class VectorIndexer:
     def _is_metadata_path(path: Path) -> bool:
         """Check if path is a metadata JSON file, not markdown."""
         normalized = str(path).replace("\\", "/")
-        # Match paths like 'spring-boot/4.0.5/metadata/xxx.json' or 'metadata/xxx.json'
+        if path.name == "metadata.json":
+            return True
+        # Match legacy paths like 'spring-boot/4.0.5/metadata/xxx.json' or 'metadata/xxx.json'
         return "/metadata/" in normalized and path.suffix == ".json"
 
     def _metadata_path_for(self, markdown_path: Path) -> Path:
         """Compute metadata JSON path for a markdown file.
         
-        Given a markdown path like 'spring-boot/4.0.5/abc123.md',
-        returns 'docs_dir/spring-boot/4.0.5/metadata/abc123.json'.
+        Supports:
+        - New layout: '{module}/{version}/{url_hash}/document.md' -> sibling 'metadata.json'
+        - Legacy layout: '{module}/{version}/{url_hash}.md' -> 'metadata/{url_hash}.json'
         """
+        if markdown_path.name == "document.md":
+            return self.config.docs_dir / markdown_path.parent / "metadata.json"
+
         url_hash = markdown_path.stem
-        # Metadata sits alongside markdown in a metadata/ subfolder
+        # Legacy metadata sits in a metadata/ subfolder keyed by URL hash.
         return self.config.docs_dir / markdown_path.parent / "metadata" / f"{url_hash}.json"
 
     @staticmethod

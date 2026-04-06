@@ -20,10 +20,13 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from everspring_mcp.models.base import compute_hash
 from everspring_mcp.models.content import (
+    ApiClassSignature,
     CodeExample,
     CodeLanguage,
     ContentType,
     DocumentSection,
+    MethodParameter,
+    MethodSignature,
     ScrapedPage,
 )
 from everspring_mcp.models.spring import SpringModule, SpringVersion
@@ -90,6 +93,24 @@ LANGUAGE_PATTERNS: dict[str, CodeLanguage] = {
 # Spring annotation pattern for extraction
 ANNOTATION_PATTERN = re.compile(r"@(\w+)(?:\([^)]*\))?")
 
+# Java modifiers used in class/method signature extraction
+JAVA_MODIFIERS = {
+    "public",
+    "protected",
+    "private",
+    "static",
+    "final",
+    "abstract",
+    "default",
+    "synchronized",
+    "native",
+    "strictfp",
+    "sealed",
+    "non-sealed",
+    "transient",
+    "volatile",
+}
+
 
 class ParserConfig(BaseModel):
     """Configuration for SpringDocParser.
@@ -132,6 +153,33 @@ class ParserConfig(BaseModel):
     unwrap_tags: list[str] = Field(
         default_factory=lambda: ["span", "div"],
         description="Tags to unwrap (keep content)",
+    )
+    noise_selectors: list[str] = Field(
+        default_factory=lambda: [
+            "nav",
+            "footer",
+            "aside",
+            ".toc",
+            ".book-toc",
+            "#toc",
+            ".nav-toc",
+            ".edit-link",
+            ".edit-page-link",
+            ".pagination",
+            ".pager",
+            ".pagination-controls",
+            "a[rel='next']",
+            "a[rel='prev']",
+            ".next-page",
+            ".prev-page",
+            ".pagination-next",
+            ".pagination-prev",
+            "button.next",
+            "button.prev",
+            "button[aria-label='Next']",
+            "button[aria-label='Previous']",
+        ],
+        description="CSS selectors for noisy navigation/editor/pagination elements",
     )
 
 
@@ -276,6 +324,40 @@ class SpringDocParser:
         for tag_name in self.config.strip_tags:
             for tag in soup.find_all(tag_name):
                 tag.decompose()
+
+        protected_version_nodes: list[Tag] = []
+        seen_version_nodes: set[int] = set()
+        for selector in self.config.version_selectors:
+            for node in soup.select(selector):
+                if not isinstance(node, Tag):
+                    continue
+                node_id = id(node)
+                if node_id in seen_version_nodes:
+                    continue
+                seen_version_nodes.add(node_id)
+                protected_version_nodes.append(node)
+
+        removed_noise = 0
+        for selector in self.config.noise_selectors:
+            for node in soup.select(selector):
+                if not isinstance(node, Tag):
+                    continue
+                # Preserve code examples even when class names overlap.
+                if node.find_parent(["pre", "code"]):
+                    continue
+                # Keep version marker nodes and move them out of noisy containers.
+                if node in protected_version_nodes:
+                    continue
+                protected_descendants = [
+                    protected for protected in protected_version_nodes if node in protected.parents
+                ]
+                for protected in protected_descendants:
+                    node.insert_before(protected.extract())
+                node.decompose()
+                removed_noise += 1
+
+        if removed_noise:
+            logger.debug("Pruned %d noisy nodes before markdown conversion", removed_noise)
         
         return soup
     
@@ -439,6 +521,464 @@ class SpringDocParser:
                     logger.warning(f"Failed to create CodeExample: {e}")
         
         return examples
+
+    def _normalize_whitespace(self, text: str) -> str:
+        """Collapse repeated whitespace in extracted text."""
+        return re.sub(r"\s+", " ", text).strip()
+
+    def _split_top_level(self, text: str, delimiter: str = ",") -> list[str]:
+        """Split text on delimiter while preserving nested generic/type expressions."""
+        parts: list[str] = []
+        current: list[str] = []
+        angle = 0
+        paren = 0
+        bracket = 0
+
+        for char in text:
+            if char == "<":
+                angle += 1
+            elif char == ">" and angle > 0:
+                angle -= 1
+            elif char == "(":
+                paren += 1
+            elif char == ")" and paren > 0:
+                paren -= 1
+            elif char == "[":
+                bracket += 1
+            elif char == "]" and bracket > 0:
+                bracket -= 1
+
+            if (
+                char == delimiter
+                and angle == 0
+                and paren == 0
+                and bracket == 0
+            ):
+                segment = "".join(current).strip()
+                if segment:
+                    parts.append(segment)
+                current = []
+                continue
+
+            current.append(char)
+
+        tail = "".join(current).strip()
+        if tail:
+            parts.append(tail)
+        return parts
+
+    def _extract_javadoc_package(self, soup: BeautifulSoup) -> str:
+        """Extract package name from a Javadoc page header."""
+        selectors = [
+            "div.header div.sub-title",
+            "div.header div.subTitle",
+            "div.sub-title",
+            "div.subTitle",
+            "header div.sub-title",
+        ]
+        package_pattern = re.compile(r"\bpackage\s+([A-Za-z_][\w.]*)")
+
+        for selector in selectors:
+            for element in soup.select(selector):
+                text = self._normalize_whitespace(element.get_text(" ", strip=True))
+                match = package_pattern.search(text)
+                if match:
+                    return match.group(1)
+
+                if re.fullmatch(r"[A-Za-z_][\w.]*(?:\.[A-Za-z_][\w.]*)*", text):
+                    return text
+
+        package_link = soup.select_one("a[href$='package-summary.html']")
+        if package_link and isinstance(package_link, Tag):
+            text = self._normalize_whitespace(package_link.get_text(" ", strip=True))
+            if re.fullmatch(r"[A-Za-z_][\w.]*(?:\.[A-Za-z_][\w.]*)*", text):
+                return text
+
+        raise ContentExtractionError("Could not extract Javadoc package name")
+
+    def _extract_type_signature_text(self, soup: BeautifulSoup) -> str:
+        """Extract class/interface declaration text from a Javadoc page."""
+        selectors = [
+            ".type-signature",
+            ".typeSignature",
+            "section.class-description pre",
+            "div.class-description pre",
+            "div.description > pre",
+            "li.blockList > pre",
+            "li.block-list > pre",
+        ]
+
+        for selector in selectors:
+            for element in soup.select(selector):
+                text = self._normalize_whitespace(element.get_text(" ", strip=True))
+                if not text:
+                    continue
+                if re.search(r"\b(@interface|class|interface|enum)\b", text):
+                    return text
+
+        # Fallback for pages where declaration is rendered in header text.
+        title = soup.select_one("h1.title, h1")
+        if title and isinstance(title, Tag):
+            title_text = self._normalize_whitespace(title.get_text(" ", strip=True))
+            match = re.search(r"\b(Class|Interface|Enum|Annotation)\s+([A-Za-z_]\w*)", title_text)
+            if match:
+                mapped = {
+                    "Class": "class",
+                    "Interface": "interface",
+                    "Enum": "enum",
+                    "Annotation": "@interface",
+                }[match.group(1)]
+                return f"public {mapped} {match.group(2)}"
+
+        raise ContentExtractionError("Could not extract Javadoc class/interface declaration")
+
+    def _parse_class_signature(
+        self,
+        signature_text: str,
+    ) -> tuple[str, str, list[str], str | None, list[str], list[str]]:
+        """Parse class/interface declaration into structured parts."""
+        signature = self._normalize_whitespace(signature_text)
+        kind_match = re.search(r"\b(@interface|class|interface|enum)\b", signature)
+        if not kind_match:
+            raise ContentExtractionError("Javadoc declaration missing class/interface keyword")
+
+        kind_token = kind_match.group(1)
+        signature_type = "annotation" if kind_token == "@interface" else kind_token
+
+        prefix = signature[:kind_match.start()].strip()
+        suffix = signature[kind_match.end():].strip()
+
+        annotations = re.findall(r"@\w+(?:\([^)]*\))?", prefix)
+        prefix_no_annotations = re.sub(r"@\w+(?:\([^)]*\))?", "", prefix).strip()
+        modifiers = [token for token in prefix_no_annotations.split() if token in JAVA_MODIFIERS]
+
+        name_match = re.match(r"([A-Za-z_]\w*)", suffix)
+        if not name_match:
+            raise ContentExtractionError("Javadoc declaration missing class/interface name")
+
+        class_name = name_match.group(1)
+        inheritance = suffix[name_match.end():].strip()
+
+        extends: str | None = None
+        implements: list[str] = []
+
+        extends_match = re.search(r"\bextends\b\s+(.+?)(?=\bimplements\b|$)", inheritance)
+        if extends_match:
+            extends = self._normalize_whitespace(extends_match.group(1).strip(" ,"))
+
+        implements_match = re.search(r"\bimplements\b\s+(.+)$", inheritance)
+        if implements_match:
+            implements = [
+                self._normalize_whitespace(item)
+                for item in self._split_top_level(implements_match.group(1))
+                if item.strip()
+            ]
+        elif signature_type == "interface" and extends_match:
+            # Interfaces use "extends" for superinterfaces; keep them in the same
+            # field so retrieval can still reason over interface contracts.
+            implements = [
+                self._normalize_whitespace(item)
+                for item in self._split_top_level(extends_match.group(1))
+                if item.strip()
+            ]
+
+        return class_name, signature_type, modifiers, extends, implements, annotations
+
+    def _extract_method_tag_docs(self, container: Tag) -> tuple[dict[str, str], str | None, list[str]]:
+        """Extract @param, @return, and throws docs from a Javadoc method block."""
+        param_docs: dict[str, str] = {}
+        return_doc: str | None = None
+        throws: list[str] = []
+
+        for dl in container.select("dl"):
+            current_label: str | None = None
+            for node in dl.children:
+                if not isinstance(node, Tag):
+                    continue
+
+                if node.name == "dt":
+                    current_label = self._normalize_whitespace(node.get_text(" ", strip=True)).lower().rstrip(":")
+                    continue
+
+                if node.name != "dd" or not current_label:
+                    continue
+
+                text = self._normalize_whitespace(node.get_text(" ", strip=True))
+                if not text:
+                    continue
+
+                if current_label.startswith("parameters"):
+                    code = node.find("code")
+                    param_name = ""
+                    if code and isinstance(code, Tag):
+                        param_name = self._normalize_whitespace(code.get_text(" ", strip=True))
+                    if not param_name:
+                        match = re.match(r"([A-Za-z_]\w*)\s*(?:-|:)\s*(.*)", text)
+                        if match:
+                            param_name = match.group(1)
+                            text = match.group(2)
+                    if param_name:
+                        cleaned = text
+                        if cleaned.startswith(param_name):
+                            cleaned = cleaned[len(param_name):].lstrip(" -:")
+                        param_docs[param_name] = cleaned.strip()
+
+                elif current_label.startswith("returns"):
+                    return_doc = text
+
+                elif current_label.startswith("throws") or current_label.startswith("exception"):
+                    code = node.find("code")
+                    throws_name = ""
+                    if code and isinstance(code, Tag):
+                        throws_name = self._normalize_whitespace(code.get_text(" ", strip=True))
+                    if not throws_name:
+                        throws_match = re.match(r"([A-Za-z_][\w.]*)", text)
+                        if throws_match:
+                            throws_name = throws_match.group(1)
+                    if throws_name and throws_name not in throws:
+                        throws.append(throws_name)
+
+        return param_docs, return_doc, throws
+
+    def _parse_method_parameters(
+        self,
+        parameter_text: str,
+        param_docs: dict[str, str],
+    ) -> list[MethodParameter]:
+        """Parse a Java method parameter list."""
+        if not parameter_text or parameter_text == "()":
+            return []
+
+        parameters: list[MethodParameter] = []
+        for raw_param in self._split_top_level(parameter_text):
+            cleaned = self._normalize_whitespace(raw_param)
+            if not cleaned:
+                continue
+
+            cleaned = re.sub(r"@\w+(?:\([^)]*\))?\s*", "", cleaned)
+            cleaned = re.sub(r"\b(final|volatile|transient)\b\s+", "", cleaned)
+
+            name_match = re.search(r"([A-Za-z_]\w*)\s*$", cleaned)
+            if not name_match:
+                continue
+
+            param_name = name_match.group(1)
+            param_type = cleaned[:name_match.start()].strip()
+            if not param_type:
+                continue
+
+            parameters.append(
+                MethodParameter(
+                    name=param_name,
+                    type=param_type,
+                    description=param_docs.get(param_name) or None,
+                )
+            )
+
+        return parameters
+
+    def _parse_method_signature(
+        self,
+        signature_text: str,
+        param_docs: dict[str, str],
+        return_doc: str | None,
+        throws_docs: list[str],
+        *,
+        is_deprecated: bool,
+    ) -> MethodSignature | None:
+        """Parse a Java method declaration line into a MethodSignature model."""
+        signature = self._normalize_whitespace(signature_text).rstrip(";")
+        if "(" not in signature or ")" not in signature:
+            return None
+
+        open_idx = signature.find("(")
+        close_idx = signature.rfind(")")
+        if close_idx <= open_idx:
+            return None
+
+        method_head = signature[:open_idx].strip()
+        params_text = signature[open_idx + 1 : close_idx].strip()
+        trailing = signature[close_idx + 1 :].strip()
+
+        name_match = re.search(r"([A-Za-z_]\w*)\s*$", method_head)
+        if not name_match:
+            return None
+
+        method_name = name_match.group(1)
+        prefix = method_head[:name_match.start()].strip()
+        if not prefix:
+            return None
+
+        annotations = re.findall(r"@\w+(?:\([^)]*\))?", prefix)
+        prefix = re.sub(r"@\w+(?:\([^)]*\))?", "", prefix).strip()
+
+        tokens = prefix.split()
+        modifiers = [token for token in tokens if token in JAVA_MODIFIERS]
+        non_modifier = [token for token in tokens if token not in JAVA_MODIFIERS]
+        return_type = " ".join(non_modifier).strip()
+
+        if return_type.startswith("<"):
+            generic_depth = 0
+            split_index = 0
+            for idx, char in enumerate(return_type):
+                if char == "<":
+                    generic_depth += 1
+                elif char == ">" and generic_depth > 0:
+                    generic_depth -= 1
+                    if generic_depth == 0:
+                        split_index = idx + 1
+                        break
+            return_type = return_type[split_index:].strip()
+
+        if not return_type:
+            return None
+
+        throws = list(throws_docs)
+        throws_match = re.search(r"\bthrows\b\s+(.+)$", trailing)
+        if throws_match:
+            for item in self._split_top_level(throws_match.group(1)):
+                throw_item = self._normalize_whitespace(item)
+                if throw_item and throw_item not in throws:
+                    throws.append(throw_item)
+
+        return MethodSignature(
+            name=method_name,
+            return_type=return_type,
+            return_description=return_doc,
+            parameters=self._parse_method_parameters(params_text, param_docs),
+            modifiers=modifiers,
+            annotations=annotations,
+            is_deprecated=is_deprecated,
+            throws=throws,
+        )
+
+    def extract_api_signature(self, javadoc_html: str | BeautifulSoup | Tag) -> ApiClassSignature:
+        """Extract high-signal class/interface + method signatures from Javadoc HTML.
+
+        This intentionally ignores descriptive prose and keeps only:
+        - Class/interface definition
+        - Implemented interfaces
+        - Method signatures with @param/@return tags
+        """
+        if isinstance(javadoc_html, BeautifulSoup):
+            soup = javadoc_html
+        elif isinstance(javadoc_html, Tag):
+            soup = self._create_soup(str(javadoc_html))
+        else:
+            soup = self._create_soup(javadoc_html)
+
+        soup = self._clean_html(soup)
+
+        package_name = self._extract_javadoc_package(soup)
+        declaration_text = self._extract_type_signature_text(soup)
+        class_name, signature_type, modifiers, extends, implements, annotations = self._parse_class_signature(
+            declaration_text
+        )
+
+        method_sections = soup.select(
+            "section.method-details section.detail, "
+            "section.method-details li.block-list, "
+            "section.method-details li.blockList, "
+            "section.methodDetail, "
+            "section.methodDetails li.blockList"
+        )
+
+        methods: list[MethodSignature] = []
+        seen_method_keys: set[tuple[str, str, str]] = set()
+        for section in method_sections:
+            if not isinstance(section, Tag):
+                continue
+
+            signature_el = section.select_one(".member-signature, .memberSignature, pre")
+            if not signature_el or not isinstance(signature_el, Tag):
+                continue
+
+            signature_text = self._normalize_whitespace(signature_el.get_text(" ", strip=True))
+            if not signature_text:
+                continue
+
+            param_docs, return_doc, throws_docs = self._extract_method_tag_docs(section)
+            deprecated_text = self._normalize_whitespace(section.get_text(" ", strip=True)).lower()
+            method = self._parse_method_signature(
+                signature_text,
+                param_docs,
+                return_doc,
+                throws_docs,
+                is_deprecated="deprecated" in deprecated_text,
+            )
+            if not method:
+                continue
+
+            key = (
+                method.name,
+                ",".join(param.type for param in method.parameters),
+                method.return_type,
+            )
+            if key in seen_method_keys:
+                continue
+            seen_method_keys.add(key)
+            methods.append(method)
+
+        class_is_deprecated = (
+            any(annotation == "@Deprecated" for annotation in annotations)
+            or bool(soup.select_one(".deprecated-label, .deprecatedLabel, .deprecation-block, .deprecated"))
+        )
+
+        return ApiClassSignature(
+            name=class_name,
+            package=package_name,
+            type=signature_type,
+            modifiers=modifiers,
+            extends=extends,
+            implements=implements,
+            annotations=annotations,
+            methods=methods,
+            is_deprecated=class_is_deprecated,
+        )
+
+    def _api_signature_to_markdown(self, signature: ApiClassSignature) -> str:
+        """Render API signature model into compact, high-signal markdown."""
+        definition_parts = [*signature.annotations, *signature.modifiers]
+        keyword = "@interface" if signature.type == "annotation" else signature.type
+        definition_parts.extend([keyword, signature.name])
+
+        if signature.extends:
+            definition_parts.extend(["extends", signature.extends])
+        if signature.implements:
+            definition_parts.extend(["implements", ", ".join(signature.implements)])
+
+        lines = [
+            f"# {signature.fully_qualified_name}",
+            "",
+            "## Type Definition",
+            f"`{' '.join(part for part in definition_parts if part).strip()}`",
+            "",
+        ]
+
+        if signature.implements:
+            lines.append("## Implemented Interfaces")
+            for interface_name in signature.implements:
+                lines.append(f"- `{interface_name}`")
+            lines.append("")
+
+        lines.append("## Method Signatures")
+        for method in signature.methods:
+            method_parts = [*method.annotations, *method.modifiers, method.return_type]
+            params = ", ".join(f"{param.type} {param.name}" for param in method.parameters)
+            method_line = f"`{' '.join(part for part in method_parts if part).strip()} {method.name}({params})`"
+            lines.append(f"- {method_line}")
+
+            for param in method.parameters:
+                if param.description:
+                    lines.append(f"  - `@param {param.name}`: {param.description}")
+
+            if method.return_description:
+                lines.append(f"  - `@return`: {method.return_description}")
+
+            for throw_name in method.throws:
+                lines.append(f"  - `@throws {throw_name}`")
+
+        return "\n".join(lines).strip()
     
     def _detect_code_language(self, element: Tag) -> CodeLanguage:
         """Detect programming language from code element."""
@@ -489,11 +1029,11 @@ class SpringDocParser:
         Returns:
             Clean Markdown string
         """
-        if isinstance(html, Tag):
-            html = str(html)
-        
+        clean_soup = self._create_soup(str(html))
+        clean_soup = self._clean_html(clean_soup)
+
         # Use custom converter
-        md = self._converter.convert(html)
+        md = self._converter.convert(str(clean_soup))
         
         # Clean up Spring docs copy-button artifacts
         md = re.sub(r"Copied!(?=\s|$)", "", md)
@@ -535,9 +1075,14 @@ class SpringDocParser:
             title = heading.get_text(strip=True)
             
             # Generate ID from heading
-            heading_id = heading.get("id", "")
+            raw_heading_id = str(heading.get("id", "") or "")
+            if raw_heading_id:
+                heading_id = re.sub(r"[^a-z0-9\-]+", "-", raw_heading_id.lower())
+            else:
+                heading_id = re.sub(r"[^a-z0-9]+", "-", title.lower())
+            heading_id = re.sub(r"-{2,}", "-", heading_id).strip("-")
             if not heading_id:
-                heading_id = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
+                heading_id = f"section-{len(sections)}"
             
             # Get content until next heading
             section_content = []
@@ -562,7 +1107,7 @@ class SpringDocParser:
             
             try:
                 section = DocumentSection(
-                    id=heading_id[:50] if heading_id else f"section-{len(sections)}",
+                    id=heading_id[:50],
                     title=title,
                     level=level,
                     content=section_md if section_md.strip() else title,
@@ -651,15 +1196,48 @@ class SpringDocParser:
                     "API documentation scraping requires an explicit release version",
                     url=url,
                 )
-            version_text = self.extract_version(soup)
             try:
-                parsed_version = SpringVersion.parse(module, version_text)
-            except ValueError as exc:
-                raise ContentExtractionError(str(exc), url=url) from exc
-            if version and parsed_version != version:
-                raise ContentExtractionError(
-                    f"Version mismatch: expected {version.version_string}, got {parsed_version.version_string}",
+                version_text = self.extract_version(soup)
+            except ContentExtractionError:
+                if content_type == ContentType.REFERENCE and version is not None:
+                    parsed_version = version
+                    logger.debug(
+                        "Using provided release version %s for reference page: %s",
+                        version.version_string,
+                        url,
+                    )
+                else:
+                    raise
+            else:
+                try:
+                    parsed_version = SpringVersion.parse(module, version_text)
+                except ValueError as exc:
+                    raise ContentExtractionError(str(exc), url=url) from exc
+                if version and parsed_version != version:
+                    raise ContentExtractionError(
+                        f"Version mismatch: expected {version.version_string}, got {parsed_version.version_string}",
+                        url=url,
+                    )
+
+        if content_type == ContentType.API_DOC:
+            try:
+                api_signature = self.extract_api_signature(soup)
+            except ContentExtractionError:
+                logger.debug(
+                    "No class-level API signature extracted for %s; using generic markdown parser",
+                    url,
+                )
+            else:
+                return ScrapedPage.create(
                     url=url,
+                    module=module,
+                    version=parsed_version,
+                    submodule=submodule,
+                    title=title,
+                    raw_html=html,
+                    markdown_content=self._api_signature_to_markdown(api_signature),
+                    content_type=content_type,
+                    sections=[],
                 )
         
         # Extract main content

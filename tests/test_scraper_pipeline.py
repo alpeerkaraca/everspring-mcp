@@ -11,29 +11,27 @@ Tests for:
 from __future__ import annotations
 
 import json
-from typing import Any
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import boto3
 import pytest
-from moto import mock_aws
 from pydantic import ValidationError
 
 from everspring_mcp.models.base import compute_hash
 from everspring_mcp.models.content import ContentType
 from everspring_mcp.models.spring import SpringModule, SpringVersion
+from everspring_mcp.scraper.browser import NotModifiedSignal
 from everspring_mcp.scraper.pipeline import (
     PipelineConfig,
     PipelineStatus,
     S3Client,
     ScrapeResult,
-    ScrapeTarget,
     ScraperPipeline,
+    ScrapeTarget,
     lambda_handler,
 )
 from everspring_mcp.scraper.registry import SubmoduleRegistry
-
 
 # =============================================================================
 # ScrapeTarget Validation Tests
@@ -52,7 +50,7 @@ class TestScrapeTarget:
             minor=0,
             patch=0,
         )
-        
+
         assert target.url == "https://docs.spring.io/spring-boot/reference/"
         assert target.module == SpringModule.BOOT
         assert target.major == 4
@@ -66,7 +64,7 @@ class TestScrapeTarget:
             minor=1,
             patch=2,
         )
-        
+
         version = target.version
         assert isinstance(version, SpringVersion)
         assert version.major == 4
@@ -82,8 +80,21 @@ class TestScrapeTarget:
             minor=1,
             patch=0,
         )
-        
+
         assert target.s3_key_prefix_for(target.version) == "spring-boot/4.1.0"
+
+    def test_scrape_target_s3_key_prefix_with_submodule(self) -> None:
+        """Submodule should be encoded as module-submodule segment."""
+        target = ScrapeTarget(
+            url="https://docs.spring.io/spring-data/redis/reference/",
+            module=SpringModule.DATA,
+            submodule="redis",
+            major=4,
+            minor=1,
+            patch=0,
+        )
+
+        assert target.s3_key_prefix_for(target.version) == "spring-data-redis/4.1.0"
 
     def test_scrape_target_invalid_version(self) -> None:
         """Test ScrapeTarget rejects invalid Spring versions."""
@@ -125,7 +136,7 @@ class TestScrapeTarget:
             minor=0,
             patch=5,
         )
-        
+
         assert target.content_type == ContentType.REFERENCE
 
 
@@ -144,7 +155,7 @@ class TestPipelineConfig:
             s3_prefix="docs",
             aws_region="us-west-2",
         )
-        
+
         assert config.s3_bucket == "my-bucket"
         assert config.s3_prefix == "docs"
         assert config.aws_region == "us-west-2"
@@ -152,8 +163,8 @@ class TestPipelineConfig:
     def test_config_defaults(self) -> None:
         """Test PipelineConfig default values."""
         config = PipelineConfig(s3_bucket="my-bucket")
-        
-        assert config.s3_prefix == "docs"
+
+        assert config.s3_prefix == "spring-docs/raw-data"
         assert config.aws_region == "us-east-1"
 
 
@@ -188,7 +199,7 @@ class TestSubmoduleRegistry:
     def test_config_from_env(self, pipeline_env_vars: None) -> None:
         """Test PipelineConfig.from_env() loads from environment."""
         config = PipelineConfig.from_env()
-        
+
         assert config.s3_bucket == "test-bucket"
         assert config.s3_prefix == "test-docs"
         assert config.aws_region == "us-east-1"
@@ -196,10 +207,10 @@ class TestSubmoduleRegistry:
     def test_config_from_env_missing_bucket(self) -> None:
         """Test from_env raises when bucket not set."""
         import os
-        
+
         # Ensure bucket is not set
         os.environ.pop("EVERSPRING_S3_BUCKET", None)
-        
+
         with pytest.raises(ValueError, match="EVERSPRING_S3_BUCKET"):
             PipelineConfig.from_env()
 
@@ -224,38 +235,38 @@ class TestS3Client:
             prefix="docs",
             region="us-east-1",
         )
-        
+
         assert client.bucket == "test-bucket"
         assert client.prefix == "docs"
 
     def test_full_key_with_prefix(self, mock_s3: Any) -> None:
         """Test S3Client._full_key adds prefix."""
         client = S3Client(bucket="test-bucket", prefix="docs")
-        
+
         full_key = client._full_key("spring-boot/4.0.0/page.md")
         assert full_key == "docs/spring-boot/4.0.0/page.md"
 
     def test_full_key_no_prefix(self, mock_s3: Any) -> None:
         """Test S3Client._full_key without prefix."""
         client = S3Client(bucket="test-bucket", prefix="")
-        
+
         full_key = client._full_key("spring-boot/4.0.0/page.md")
         assert full_key == "spring-boot/4.0.0/page.md"
 
     def test_upload_content_with_hash_verification(self, mock_s3: Any) -> None:
         """Test upload_content verifies SHA-256 hash."""
         client = S3Client(bucket="test-bucket", prefix="docs")
-        
+
         content = "# Test Content\n\nThis is test content."
         content_hash = compute_hash(content)
-        
+
         s3_ref = client.upload_content(
             content=content,
             key="spring-boot/4.0.0/test.md",
             content_hash=content_hash,
             metadata={"source-url": "https://example.com"},
         )
-        
+
         assert s3_ref.bucket == "test-bucket"
         assert s3_ref.key == "docs/spring-boot/4.0.0/test.md"
         assert s3_ref.content_hash == content_hash
@@ -263,10 +274,10 @@ class TestS3Client:
     def test_upload_content_hash_mismatch_raises(self, mock_s3: Any) -> None:
         """Test upload_content raises on hash mismatch."""
         client = S3Client(bucket="test-bucket", prefix="docs")
-        
+
         content = "# Test Content"
         wrong_hash = "0" * 64  # Wrong hash
-        
+
         with pytest.raises(ValueError, match="hash mismatch"):
             client.upload_content(
                 content=content,
@@ -277,22 +288,22 @@ class TestS3Client:
     def test_upload_content_stores_metadata(self, mock_s3: Any) -> None:
         """Test upload_content stores SHA-256 hash in S3 metadata."""
         client = S3Client(bucket="test-bucket", prefix="docs")
-        
+
         content = "# Test"
         content_hash = compute_hash(content)
-        
+
         client.upload_content(
             content=content,
             key="test.md",
             content_hash=content_hash,
         )
-        
+
         # Verify metadata was stored
         response = mock_s3.head_object(
             Bucket="test-bucket",
             Key="docs/test.md",
         )
-        
+
         assert response["Metadata"]["content-hash"] == content_hash
         assert "schema-version" in response["Metadata"]
 
@@ -305,23 +316,23 @@ class TestS3Client:
             Body=b"content",
             Metadata={"content-hash": "abc123"},
         )
-        
+
         client = S3Client(bucket="test-bucket", prefix="docs")
         hash_value = client.get_content_hash("existing.md")
-        
+
         assert hash_value == "abc123"
 
     def test_get_content_hash_nonexistent_object(self, mock_s3: Any) -> None:
         """Test get_content_hash returns None for nonexistent object."""
         client = S3Client(bucket="test-bucket", prefix="docs")
         hash_value = client.get_content_hash("nonexistent.md")
-        
+
         assert hash_value is None
 
     def test_should_upload_new_content(self, mock_s3: Any) -> None:
         """Test should_upload returns True for new content."""
         client = S3Client(bucket="test-bucket", prefix="docs")
-        
+
         should = client.should_upload("new-file.md", compute_hash("new content"))
         assert should is True
 
@@ -334,17 +345,17 @@ class TestS3Client:
             Body=b"old content",
             Metadata={"content-hash": compute_hash("old content")},
         )
-        
+
         client = S3Client(bucket="test-bucket", prefix="docs")
         should = client.should_upload("existing.md", compute_hash("new content"))
-        
+
         assert should is True
 
     def test_should_upload_unchanged_content(self, mock_s3: Any) -> None:
         """Test should_upload returns False when hash unchanged."""
         content = "unchanged content"
         content_hash = compute_hash(content)
-        
+
         # Upload existing content with same hash
         mock_s3.put_object(
             Bucket="test-bucket",
@@ -352,22 +363,22 @@ class TestS3Client:
             Body=content.encode(),
             Metadata={"content-hash": content_hash},
         )
-        
+
         client = S3Client(bucket="test-bucket", prefix="docs")
         should = client.should_upload("existing.md", content_hash)
-        
+
         assert should is False
 
     def test_upload_json(self, mock_s3: Any) -> None:
         """Test upload_json uploads JSON data."""
         client = S3Client(bucket="test-bucket", prefix="docs")
-        
+
         data = {"title": "Test", "version": "4.0.0"}
-        
+
         s3_ref = client.upload_json(data, "metadata/test.json")
-        
+
         assert s3_ref.key == "docs/metadata/test.json"
-        
+
         # Verify content
         response = mock_s3.get_object(
             Bucket="test-bucket",
@@ -402,20 +413,22 @@ class TestScraperPipeline:
             minor=0,
             patch=5,
         )
-        
+
         with patch(
             "everspring_mcp.scraper.pipeline.SpringBrowser",
             return_value=mock_browser,
         ):
             pipeline = ScraperPipeline(pipeline_config)
             result = await pipeline.scrape_url(target)
-        
+
         assert result.status == PipelineStatus.SUCCESS
         assert result.content_hash is not None
         assert result.s3_ref is not None
         assert result.error_message is None
         assert result.target.version is not None
         assert result.target.version.version_string == "4.0.5"
+        expected_hash = compute_hash("https://docs.spring.io/spring-boot/reference/")[:16]
+        assert result.s3_ref.key == f"test-docs/spring-boot/4.0.5/{expected_hash}/document.md"
 
     @pytest.mark.asyncio
     async def test_scrape_url_skipped_unchanged(
@@ -427,7 +440,7 @@ class TestScraperPipeline:
     ) -> None:
         """Test scraping skips when content unchanged."""
         from everspring_mcp.scraper.parser import SpringDocParser
-        
+
         # Pre-compute the hash that will be generated
         parser = SpringDocParser()
         version = SpringVersion(module=SpringModule.BOOT, major=4, minor=0, patch=5)
@@ -437,18 +450,18 @@ class TestScraperPipeline:
             module=SpringModule.BOOT,
             version=version,
         )
-        
+
         # Upload existing content with same hash
         url_hash = compute_hash("https://docs.spring.io/spring-boot/reference/")[:16]
-        key = f"test-docs/spring-boot/4.0.5/{url_hash}.md"
-        
+        key = f"test-docs/spring-boot/4.0.5/{url_hash}/document.md"
+
         mock_s3.put_object(
             Bucket="test-bucket",
             Key=key,
             Body=scraped.markdown_content.encode(),
             Metadata={"content-hash": scraped.content_hash},
         )
-        
+
         target = ScrapeTarget(
             url="https://docs.spring.io/spring-boot/reference/",
             module=SpringModule.BOOT,
@@ -456,16 +469,67 @@ class TestScraperPipeline:
             minor=0,
             patch=5,
         )
-        
+
         with patch(
             "everspring_mcp.scraper.pipeline.SpringBrowser",
             return_value=mock_browser,
         ):
             pipeline = ScraperPipeline(pipeline_config)
             result = await pipeline.scrape_url(target)
-        
+
         assert result.status == PipelineStatus.SKIPPED
         assert result.content_hash == scraped.content_hash
+
+    @pytest.mark.asyncio
+    async def test_scrape_url_skips_before_playwright_when_precheck_matches(
+        self,
+        mock_s3: Any,
+        pipeline_config: PipelineConfig,
+        mock_browser: AsyncMock,
+    ) -> None:
+        """Fast precheck match should skip Playwright navigation entirely."""
+        existing_content_hash = "a" * 64
+        existing_precheck_hash = "b" * 64
+        url = "https://docs.spring.io/spring-boot/reference/"
+        url_hash = compute_hash(url)[:16]
+        key = f"test-docs/spring-boot/4.0.5/{url_hash}/document.md"
+
+        mock_s3.put_object(
+            Bucket="test-bucket",
+            Key=key,
+            Body=b"existing content",
+            Metadata={
+                "content-hash": existing_content_hash,
+                "precheck-hash": existing_precheck_hash,
+            },
+        )
+
+        mock_browser.fast_precheck = AsyncMock(
+            return_value=NotModifiedSignal(
+                url=url, content_hash=existing_precheck_hash
+            ),
+        )
+        mock_browser.last_precheck_hash = existing_precheck_hash
+
+        target = ScrapeTarget(
+            url=url,
+            module=SpringModule.BOOT,
+            major=4,
+            minor=0,
+            patch=5,
+        )
+
+        with patch(
+            "everspring_mcp.scraper.pipeline.SpringBrowser",
+            return_value=mock_browser,
+        ):
+            pipeline = ScraperPipeline(pipeline_config)
+            result = await pipeline.scrape_url(target)
+
+        assert result.status == PipelineStatus.SKIPPED
+        assert result.content_hash == existing_content_hash
+        mock_browser.navigate_with_retry.assert_not_awaited()
+        mock_browser.get_html.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_scrape_url_failure(
@@ -475,7 +539,7 @@ class TestScraperPipeline:
     ) -> None:
         """Test scrape_url handles navigation failures."""
         from everspring_mcp.scraper.exceptions import NavigationError
-        
+
         # Mock browser that raises error
         mock_browser = AsyncMock()
         mock_browser.__aenter__ = AsyncMock(return_value=mock_browser)
@@ -483,7 +547,7 @@ class TestScraperPipeline:
         mock_browser.navigate_with_retry = AsyncMock(
             side_effect=NavigationError("Connection failed")
         )
-        
+
         target = ScrapeTarget(
             url="https://docs.spring.io/spring-boot/reference/",
             module=SpringModule.BOOT,
@@ -491,14 +555,14 @@ class TestScraperPipeline:
             minor=0,
             patch=5,
         )
-        
+
         with patch(
             "everspring_mcp.scraper.pipeline.SpringBrowser",
             return_value=mock_browser,
         ):
             pipeline = ScraperPipeline(pipeline_config)
             result = await pipeline.scrape_url(target)
-        
+
         assert result.status == PipelineStatus.FAILED
         assert result.error_message is not None
         assert "Connection failed" in result.error_message
@@ -521,14 +585,14 @@ class TestScraperPipeline:
             )
             for i in range(3)
         ]
-        
+
         with patch(
             "everspring_mcp.scraper.pipeline.SpringBrowser",
             return_value=mock_browser,
         ):
             pipeline = ScraperPipeline(pipeline_config)
             results = await pipeline.process_batch(targets, concurrency=2)
-        
+
         assert len(results) == 3
         # All should succeed (using mock browser)
         assert all(r.status == PipelineStatus.SUCCESS for r in results)
@@ -542,7 +606,7 @@ class TestScraperPipeline:
         """Test batch processing with empty targets."""
         pipeline = ScraperPipeline(pipeline_config)
         results = await pipeline.process_batch([], concurrency=2)
-        
+
         assert results == []
 
     @pytest.mark.asyncio
@@ -575,11 +639,16 @@ class TestScraperPipeline:
             status=DiscoveryStatus.COMPLETED,
         )
 
-        with patch("everspring_mcp.scraper.discovery.SpringDocDiscovery") as discovery_cls, patch.object(
-            DiscoveryResult,
-            "to_scrape_targets",
-            return_value=[],
-        ) as to_targets:
+        with (
+            patch(
+                "everspring_mcp.scraper.discovery.SpringDocDiscovery"
+            ) as discovery_cls,
+            patch.object(
+                DiscoveryResult,
+                "to_scrape_targets",
+                return_value=[],
+            ) as to_targets,
+        ):
             discovery_instance = MagicMock()
             discovery_instance.discover = AsyncMock(return_value=fake_result)
             discovery_cls.return_value = discovery_instance
@@ -617,7 +686,7 @@ class TestScrapeResult:
     def test_scrape_result_success(self) -> None:
         """Test creating success ScrapeResult."""
         from everspring_mcp.models.sync import S3ObjectRef
-        
+
         target = ScrapeTarget(
             url="https://example.com/",
             module=SpringModule.BOOT,
@@ -629,13 +698,13 @@ class TestScrapeResult:
             bucket="test-bucket",
             key="docs/test.md",
         )
-        
+
         result = ScrapeResult.success(
             target=target,
             s3_ref=s3_ref,
             content_hash="a" * 64,
         )
-        
+
         assert result.status == PipelineStatus.SUCCESS
         assert result.s3_ref == s3_ref
         assert result.error_message is None
@@ -649,12 +718,12 @@ class TestScrapeResult:
             minor=0,
             patch=5,
         )
-        
+
         result = ScrapeResult.skipped(
             target=target,
             content_hash="a" * 64,
         )
-        
+
         assert result.status == PipelineStatus.SKIPPED
         assert result.s3_ref is None
 
@@ -667,12 +736,12 @@ class TestScrapeResult:
             minor=0,
             patch=5,
         )
-        
+
         result = ScrapeResult.failed(
             target=target,
             error="Connection timeout",
         )
-        
+
         assert result.status == PipelineStatus.FAILED
         assert result.error_message == "Connection timeout"
 
@@ -705,13 +774,13 @@ class TestLambdaHandler:
             ],
             "concurrency": 1,
         }
-        
+
         with patch(
             "everspring_mcp.scraper.pipeline.SpringBrowser",
             return_value=mock_browser,
         ):
             response = lambda_handler(event, None)
-        
+
         assert response["statusCode"] == 200
         assert response["body"]["processed"] == 1
         assert response["body"]["status_counts"]["success"] == 1
@@ -723,9 +792,9 @@ class TestLambdaHandler:
     ) -> None:
         """Test lambda_handler returns error when no targets."""
         event = {"targets": []}
-        
+
         response = lambda_handler(event, None)
-        
+
         assert response["statusCode"] == 400
         assert "error" in response["body"]
 
@@ -746,19 +815,19 @@ class TestLambdaHandler:
                 },
             ],
         }
-        
+
         response = lambda_handler(event, None)
-        
+
         # Should return 400 because no valid targets after parsing
         assert response["statusCode"] == 400
 
     def test_lambda_handler_missing_bucket_env(self) -> None:
         """Test lambda_handler returns error when bucket not configured."""
         import os
-        
+
         # Ensure bucket is not set
         os.environ.pop("EVERSPRING_S3_BUCKET", None)
-        
+
         event = {
             "targets": [
                 {
@@ -770,9 +839,9 @@ class TestLambdaHandler:
                 }
             ],
         }
-        
+
         response = lambda_handler(event, None)
-        
+
         assert response["statusCode"] == 500
         assert "Configuration error" in response["body"]["error"]
 
@@ -794,20 +863,20 @@ class TestLambdaHandler:
                 }
             ],
         }
-        
+
         with patch(
             "everspring_mcp.scraper.pipeline.SpringBrowser",
             return_value=mock_browser,
         ):
             response = lambda_handler(event, None)
-        
+
         # Check response structure
         assert "statusCode" in response
         assert "body" in response
         assert "processed" in response["body"]
         assert "status_counts" in response["body"]
         assert "results" in response["body"]
-        
+
         # Check result structure
         result = response["body"]["results"][0]
         assert "url" in result
@@ -839,35 +908,35 @@ class TestPipelineIntegration:
             minor=0,
             patch=5,
         )
-        
+
         with patch(
             "everspring_mcp.scraper.pipeline.SpringBrowser",
             return_value=mock_browser,
         ):
             pipeline = ScraperPipeline(pipeline_config)
             result = await pipeline.scrape_url(target)
-        
+
         # Verify result
         assert result.status == PipelineStatus.SUCCESS
         assert result.s3_ref is not None
-        
+
         # Verify S3 content
         s3_response = mock_s3.get_object(
             Bucket="test-bucket",
             Key=result.s3_ref.key,
         )
         content = s3_response["Body"].read().decode()
-        
+
         # Content should be markdown
         assert "Spring Boot Reference Documentation" in content
-        
+
         # Verify metadata
         head_response = mock_s3.head_object(
             Bucket="test-bucket",
             Key=result.s3_ref.key,
         )
         metadata = head_response["Metadata"]
-        
+
         assert metadata["content-hash"] == result.content_hash
         assert "schema-version" in metadata
         assert metadata["source-url"] == target.url

@@ -13,10 +13,9 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Self
 
-from pydantic import Field, computed_field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
 
 from .base import (
-    HashableContent,
     HttpUrl,
     MarkdownContent,
     SHA256Hash,
@@ -108,7 +107,7 @@ class DeprecationInfo(VersionedModel):
 
 class CodeExample(VersionedModel):
     """A code example from documentation."""
-    
+
     language: CodeLanguage = Field(
         description="Programming language of the code",
     )
@@ -136,7 +135,7 @@ class CodeExample(VersionedModel):
         default=None,
         description="Deprecation info if this is an outdated pattern",
     )
-    
+
     @computed_field
     @property
     def code_hash(self) -> str:
@@ -144,12 +143,119 @@ class CodeExample(VersionedModel):
         return compute_hash(self.code)
 
 
+class MethodParameter(BaseModel):
+    """A method parameter from Javadoc."""
+
+    model_config = ConfigDict(frozen=True)
+
+    name: str = Field(
+        min_length=1,
+        description="Parameter name",
+    )
+    type: str = Field(
+        min_length=1,
+        description="Parameter type (Java type)",
+    )
+    description: str | None = Field(
+        default=None,
+        description="Parameter description from @param tag",
+    )
+
+
+class MethodSignature(BaseModel):
+    """A method signature from Javadoc API documentation."""
+
+    model_config = ConfigDict(frozen=True)
+
+    name: str = Field(
+        min_length=1,
+        description="Method name",
+    )
+    return_type: str = Field(
+        min_length=1,
+        description="Return type (Java type)",
+    )
+    return_description: str | None = Field(
+        default=None,
+        description="Return value description from @return tag",
+    )
+    parameters: list[MethodParameter] = Field(
+        default_factory=list,
+        description="Method parameters",
+    )
+    modifiers: list[str] = Field(
+        default_factory=list,
+        description="Method modifiers (public, static, final, etc.)",
+    )
+    annotations: list[str] = Field(
+        default_factory=list,
+        description="Method-level annotations",
+    )
+    is_deprecated: bool = Field(
+        default=False,
+        description="Whether method is deprecated",
+    )
+    throws: list[str] = Field(
+        default_factory=list,
+        description="Exceptions thrown by this method",
+    )
+
+
+class ApiClassSignature(BaseModel):
+    """API class/interface signature from Javadoc."""
+
+    model_config = ConfigDict(frozen=True)
+
+    name: str = Field(
+        min_length=1,
+        description="Class/Interface name",
+    )
+    package: str = Field(
+        min_length=1,
+        description="Package name",
+    )
+    type: str = Field(
+        pattern=r"^(class|interface|enum|annotation)$",
+        description="Type of definition (class, interface, enum, annotation)",
+    )
+    modifiers: list[str] = Field(
+        default_factory=list,
+        description="Class modifiers (public, abstract, final, etc.)",
+    )
+    extends: str | None = Field(
+        default=None,
+        description="Parent class if any",
+    )
+    implements: list[str] = Field(
+        default_factory=list,
+        description="Implemented interfaces",
+    )
+    annotations: list[str] = Field(
+        default_factory=list,
+        description="Class-level annotations",
+    )
+    methods: list[MethodSignature] = Field(
+        default_factory=list,
+        description="Public method signatures",
+    )
+    is_deprecated: bool = Field(
+        default=False,
+        description="Whether class is deprecated",
+    )
+
+    @computed_field
+    @property
+    def fully_qualified_name(self) -> str:
+        """Fully qualified class name."""
+        return f"{self.package}.{self.name}"
+
+
 class DocumentSection(VersionedModel):
     """A section within a documentation page.
-    
+
     Supports hierarchical structure with nested subsections.
     """
-    
+
     id: str = Field(
         pattern=r"^[a-z0-9\-]+$",
         description="Section anchor ID",
@@ -174,13 +280,13 @@ class DocumentSection(VersionedModel):
         default_factory=list,
         description="Nested subsections",
     )
-    
+
     @computed_field
     @property
     def content_hash(self) -> str:
         """SHA-256 hash of section content."""
         return compute_hash(self.content)
-    
+
     @property
     def all_code_examples(self) -> list[CodeExample]:
         """Recursively collect all code examples."""
@@ -312,6 +418,9 @@ __all__ = [
     # Models
     "DeprecationInfo",
     "CodeExample",
+    "MethodParameter",
+    "MethodSignature",
+    "ApiClassSignature",
     "DocumentSection",
     "ScrapedPage",
 ]

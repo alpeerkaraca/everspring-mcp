@@ -358,6 +358,47 @@ class TestSpringDocParser:
         assert "class Demo" in markdown
         assert "Copied!" not in markdown
 
+    def test_parse_prunes_navigation_edit_and_pagination_noise(
+        self,
+        parser: SpringDocParser,
+        spring_boot_version: SpringVersion,
+    ) -> None:
+        """Parser should remove noisy chrome while keeping article and code."""
+        html = """
+        <html>
+          <body>
+            <span class="version">4.0.5</span>
+            <nav>Global Navigation Noise</nav>
+            <aside>Aside Noise</aside>
+            <footer>Footer Noise</footer>
+            <article class="doc">
+              <h1>Core Article</h1>
+              <div class="toc">Table of contents noise</div>
+              <a class="edit-link" href="/edit">Edit this page</a>
+              <div class="pagination"><a rel="next" href="/next">Next</a></div>
+              <p>Important article body content.</p>
+              <pre><code class="language-java">class Demo {}</code></pre>
+            </article>
+          </body>
+        </html>
+        """
+
+        scraped_page = parser.parse(
+            html=html,
+            url="https://docs.spring.io/spring-boot/reference/noise-test/",
+            module=SpringModule.BOOT,
+            version=spring_boot_version,
+        )
+
+        assert "Important article body content." in scraped_page.markdown_content
+        assert "class Demo" in scraped_page.markdown_content
+        assert "Global Navigation Noise" not in scraped_page.markdown_content
+        assert "Aside Noise" not in scraped_page.markdown_content
+        assert "Footer Noise" not in scraped_page.markdown_content
+        assert "Table of contents noise" not in scraped_page.markdown_content
+        assert "Edit this page" not in scraped_page.markdown_content
+        assert "Next" not in scraped_page.markdown_content
+
     def test_parse_full_page(
         self,
         parser: SpringDocParser,
@@ -427,6 +468,34 @@ class TestSpringDocParser:
             assert section.title is not None
             assert section.level >= 1
 
+    def test_scraped_page_normalizes_heading_ids_with_dots(
+        self,
+        parser: SpringDocParser,
+        spring_boot_version: SpringVersion,
+    ) -> None:
+        """Heading ids with dots should be normalized to valid section ids."""
+        html = """
+        <html>
+          <body>
+            <span class="version">4.0.5</span>
+            <article class="doc">
+              <h2 id="using.build-systems.maven">Maven</h2>
+              <p>Build with Maven.</p>
+            </article>
+          </body>
+        </html>
+        """
+        scraped_page = parser.parse(
+            html=html,
+            url="https://docs.spring.io/spring-boot/reference/using/build-systems.html",
+            module=SpringModule.BOOT,
+            version=spring_boot_version,
+            content_type=ContentType.REFERENCE,
+        )
+
+        assert len(scraped_page.sections) == 1
+        assert scraped_page.sections[0].id == "using-build-systems-maven"
+
     def test_parse_minimal_html(
         self,
         parser: SpringDocParser,
@@ -478,6 +547,35 @@ class TestSpringDocParser:
                 version=spring_framework_version,
             )
 
+    def test_reference_version_marker_inside_noise_container_is_preserved(
+        self,
+        parser: SpringDocParser,
+    ) -> None:
+        """Version marker must survive cleaning even when nested in noisy containers."""
+        html = """
+        <html>
+          <body>
+            <nav>
+              <span class="version">4.0.5</span>
+              <a href="/other">Navigation Link</a>
+            </nav>
+            <article class="doc">
+              <h1>Reference Page</h1>
+              <p>Main content body.</p>
+            </article>
+          </body>
+        </html>
+        """
+        expected_version = SpringVersion(module=SpringModule.BOOT, major=4, minor=0, patch=4)
+        with pytest.raises(ContentExtractionError, match="Version mismatch"):
+            parser.parse(
+                html=html,
+                url="https://docs.spring.io/spring-boot/reference/reference-page.html",
+                module=SpringModule.BOOT,
+                version=expected_version,
+                content_type=ContentType.REFERENCE,
+            )
+
     def test_api_doc_uses_provided_version_when_page_lacks_version(
         self,
         parser: SpringDocParser,
@@ -504,6 +602,32 @@ class TestSpringDocParser:
         )
         assert page.version == spring_boot_version
 
+    def test_reference_uses_provided_version_when_page_lacks_version(
+        self,
+        parser: SpringDocParser,
+        spring_boot_version: SpringVersion,
+    ) -> None:
+        """Reference docs should use provided release version when marker is missing."""
+        html = """
+        <html>
+          <head><title>Reference Page</title></head>
+          <body>
+            <main>
+              <h1>Getting Started</h1>
+              <p>Version marker is omitted on this page.</p>
+            </main>
+          </body>
+        </html>
+        """
+        page = parser.parse(
+            html=html,
+            url="https://docs.spring.io/spring-boot/reference/getting-started.html",
+            module=SpringModule.BOOT,
+            version=spring_boot_version,
+            content_type=ContentType.REFERENCE,
+        )
+        assert page.version == spring_boot_version
+
     def test_api_doc_requires_explicit_version_when_missing_marker(
         self,
         parser: SpringDocParser,
@@ -523,6 +647,121 @@ class TestSpringDocParser:
                 version=None,
                 content_type=ContentType.API_DOC,
             )
+
+    def test_extract_api_signature_from_javadoc_html(
+        self,
+        parser: SpringDocParser,
+    ) -> None:
+        """Extract class definition, implemented interfaces, and method tags from Javadoc."""
+        html = """
+        <html>
+          <head><title>RestTemplate (Spring Framework API)</title></head>
+          <body>
+            <div class="header">
+              <div class="sub-title">package org.springframework.web.client</div>
+              <h1 class="title">Class RestTemplate</h1>
+            </div>
+            <section class="class-description">
+              <div class="type-signature">
+                public class RestTemplate extends InterceptingHttpAccessor
+                implements RestOperations, InitializingBean
+              </div>
+            </section>
+            <section class="method-details">
+              <section class="detail" id="exchange">
+                <h3>exchange</h3>
+                <div class="member-signature">
+                  public &lt;T&gt; ResponseEntity&lt;T&gt; exchange(String url, HttpMethod method)
+                </div>
+                <dl class="notes">
+                  <dt>Parameters:</dt>
+                  <dd><code>url</code> - the URL</dd>
+                  <dd><code>method</code> - the HTTP method</dd>
+                  <dt>Returns:</dt>
+                  <dd>the response entity</dd>
+                </dl>
+              </section>
+            </section>
+            <div class="description">
+              <p>This is long descriptive prose and should not be part of the signature output.</p>
+            </div>
+          </body>
+        </html>
+        """
+
+        signature = parser.extract_api_signature(html)
+
+        assert signature.package == "org.springframework.web.client"
+        assert signature.name == "RestTemplate"
+        assert signature.type == "class"
+        assert signature.extends == "InterceptingHttpAccessor"
+        assert signature.implements == ["RestOperations", "InitializingBean"]
+        assert len(signature.methods) == 1
+
+        method = signature.methods[0]
+        assert method.name == "exchange"
+        assert method.return_type == "ResponseEntity<T>"
+        assert [param.name for param in method.parameters] == ["url", "method"]
+        assert method.parameters[0].description == "the URL"
+        assert method.parameters[1].description == "the HTTP method"
+        assert method.return_description == "the response entity"
+
+    def test_parse_api_doc_uses_compact_api_signature_markdown(
+        self,
+        parser: SpringDocParser,
+        spring_boot_version: SpringVersion,
+    ) -> None:
+        """API doc parse should keep only high-signal signature data when available."""
+        html = """
+        <html>
+          <head><title>RestTemplate (Spring Framework API)</title></head>
+          <body>
+            <div class="header">
+              <div class="sub-title">package org.springframework.web.client</div>
+              <h1 class="title">Class RestTemplate</h1>
+            </div>
+            <section class="class-description">
+              <div class="type-signature">
+                public class RestTemplate implements RestOperations
+              </div>
+            </section>
+            <section class="method-details">
+              <section class="detail" id="exchange">
+                <div class="member-signature">
+                  public ResponseEntity&lt;String&gt; exchange(String url)
+                </div>
+                <dl class="notes">
+                  <dt>Parameters:</dt>
+                  <dd><code>url</code> - target endpoint URL</dd>
+                  <dt>Returns:</dt>
+                  <dd>response payload</dd>
+                </dl>
+              </section>
+            </section>
+            <div class="description">
+              <p>
+                This verbose paragraph should be excluded to keep RAG context high-signal.
+              </p>
+            </div>
+          </body>
+        </html>
+        """
+
+        page = parser.parse(
+            html=html,
+            url="https://docs.spring.io/spring-boot/api/java/org/springframework/web/client/RestTemplate.html",
+            module=SpringModule.BOOT,
+            version=spring_boot_version,
+            content_type=ContentType.API_DOC,
+        )
+
+        assert page.sections == []
+        assert "## Type Definition" in page.markdown_content
+        assert "## Implemented Interfaces" in page.markdown_content
+        assert "## Method Signatures" in page.markdown_content
+        assert "`@param url`" in page.markdown_content
+        assert "`@return`" in page.markdown_content
+        assert "verbose paragraph" not in page.markdown_content.lower()
 
 
 # =============================================================================

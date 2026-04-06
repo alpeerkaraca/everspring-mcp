@@ -1,17 +1,20 @@
 """EverSpring MCP - S3 sync service.
 
-This module provides the S3SyncService for downloading
-documents from S3 with incremental sync support and
-enterprise-grade retry logic using tenacity.
+This module provides the S3SyncService for synchronizing
+local knowledge stores with S3, including separated
+SQLite/Chroma snapshot uploads and retry logic using tenacity.
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
+import shutil
 import time
-from datetime import datetime, timezone
+import zipfile
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -56,6 +59,33 @@ class DownloadResult(BaseModel):
     error: str | None = Field(default=None)
 
 
+class KnowledgePackTransferResult(BaseModel):
+    """Result of a knowledge pack transfer operation."""
+
+    s3_key: str = Field(description="S3 object key")
+    archive_path: Path = Field(description="Local archive path")
+    size_bytes: int = Field(description="Archive size")
+    content_hash: str = Field(description="SHA256 hash of archive")
+    extracted_to: Path | None = Field(
+        default=None,
+        description="Extraction destination when applicable",
+    )
+    success: bool = Field(default=True)
+    error: str | None = Field(default=None)
+
+
+class SnapshotTransferResult(BaseModel):
+    """Result of a DB snapshot upload operation."""
+
+    snapshot_name: str = Field(description="Snapshot file name")
+    s3_key: str = Field(description="S3 object key")
+    archive_path: Path = Field(description="Local archive path")
+    size_bytes: int = Field(description="Archive size")
+    content_hash: str = Field(description="SHA256 hash of archive")
+    success: bool = Field(default=True)
+    error: str | None = Field(default=None)
+
+
 class SyncResult(BaseModel):
     """Result of a sync operation."""
     
@@ -82,9 +112,12 @@ class SyncResult(BaseModel):
 
 
 class S3SyncService:
-    """Service for syncing documents from S3.
+    """Service for syncing knowledge packs and manifests from S3.
     
     Handles:
+    - Uploading separate DB snapshots (ChromaDB + SQLite)
+    - Uploading local SQLite + ChromaDB as a knowledge-pack archive
+    - Downloading and extracting knowledge-pack archives
     - Fetching and parsing manifests
     - Computing deltas between local and remote
     - Downloading changed files
@@ -121,6 +154,413 @@ class S3SyncService:
         )
         self._semaphore = asyncio.Semaphore(config.download_concurrency)
         logger.info(f"S3SyncService initialized in {time.perf_counter() - start:.2f}s")
+
+    @staticmethod
+    def _compute_file_hash(file_path: Path) -> str:
+        """Compute SHA-256 hash for a local file without loading all bytes at once."""
+        digest = hashlib.sha256()
+        with file_path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def _create_knowledge_pack_archive(self, archive_path: Path) -> tuple[int, str]:
+        """Create a zipped knowledge pack from local SQLite + ChromaDB persistence."""
+        db_path = self.config.db_path
+        chroma_dir = self.config.chroma_dir
+
+        if not db_path.exists():
+            raise FileNotFoundError(f"SQLite database not found: {db_path}")
+        if not chroma_dir.exists() or not chroma_dir.is_dir():
+            raise FileNotFoundError(f"ChromaDB directory not found: {chroma_dir}")
+
+        archive_path.parent.mkdir(parents=True, exist_ok=True)
+
+        with zipfile.ZipFile(
+            archive_path,
+            mode="w",
+            compression=zipfile.ZIP_DEFLATED,
+        ) as bundle:
+            bundle.write(db_path, arcname=self.config.db_filename)
+
+            chroma_files = sorted(p for p in chroma_dir.rglob("*") if p.is_file())
+            if chroma_files:
+                for file_path in chroma_files:
+                    relative = file_path.relative_to(chroma_dir).as_posix()
+                    bundle.write(file_path, arcname=f"{self.config.chroma_subdir}/{relative}")
+            else:
+                # Preserve directory structure even when Chroma is currently empty.
+                bundle.writestr(f"{self.config.chroma_subdir}/", "")
+
+        archive_hash = self._compute_file_hash(archive_path)
+        archive_size = archive_path.stat().st_size
+        return archive_size, archive_hash
+
+    def _create_sqlite_snapshot_archive(self, archive_path: Path) -> tuple[int, str]:
+        """Create a SQLite snapshot zip archive."""
+        db_path = self.config.db_path
+        if not db_path.exists():
+            raise FileNotFoundError(f"SQLite database not found: {db_path}")
+
+        archive_path.parent.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(
+            archive_path,
+            mode="w",
+            compression=zipfile.ZIP_DEFLATED,
+        ) as bundle:
+            bundle.write(db_path, arcname=self.config.db_filename)
+
+        archive_hash = self._compute_file_hash(archive_path)
+        archive_size = archive_path.stat().st_size
+        return archive_size, archive_hash
+
+    def _create_chroma_snapshot_archive(self, archive_path: Path) -> tuple[int, str]:
+        """Create a ChromaDB snapshot zip archive."""
+        chroma_dir = self.config.chroma_dir
+        if not chroma_dir.exists() or not chroma_dir.is_dir():
+            raise FileNotFoundError(f"ChromaDB directory not found: {chroma_dir}")
+
+        archive_path.parent.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(
+            archive_path,
+            mode="w",
+            compression=zipfile.ZIP_DEFLATED,
+        ) as bundle:
+            chroma_files = sorted(p for p in chroma_dir.rglob("*") if p.is_file())
+            if chroma_files:
+                for file_path in chroma_files:
+                    relative = file_path.relative_to(chroma_dir).as_posix()
+                    bundle.write(file_path, arcname=relative)
+            else:
+                bundle.writestr(".chroma-empty", "")
+
+        archive_hash = self._compute_file_hash(archive_path)
+        archive_size = archive_path.stat().st_size
+        return archive_size, archive_hash
+
+    @retry(
+        retry=retry_if_exception_type((ClientError, BotoCoreError)),
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(multiplier=1, min=2, max=30),
+        before_sleep=before_sleep_log(logger, logging.WARNING),
+        reraise=True,
+    )
+    async def upload_db_snapshots(
+        self,
+        snapshot_date: date | datetime | None = None,
+        cleanup_local_archives: bool = False,
+    ) -> list[SnapshotTransferResult]:
+        """Upload separate SQLite and ChromaDB snapshot archives to db-snapshots."""
+        chroma_archive = self.config.get_chroma_snapshot_local_path(snapshot_date)
+        sqlite_archive = self.config.get_sqlite_snapshot_local_path(snapshot_date)
+        chroma_key = self.config.get_chroma_snapshot_key(snapshot_date)
+        sqlite_key = self.config.get_sqlite_snapshot_key(snapshot_date)
+
+        jobs: list[tuple[str, Path, str, Any]] = [
+            ("chroma_db", chroma_archive, chroma_key, self._create_chroma_snapshot_archive),
+            ("sqlite_metadata", sqlite_archive, sqlite_key, self._create_sqlite_snapshot_archive),
+        ]
+
+        results: list[SnapshotTransferResult] = []
+
+        for snapshot_type, archive_path, s3_key, create_archive in jobs:
+            try:
+                archive_size, archive_hash = await asyncio.to_thread(create_archive, archive_path)
+
+                await asyncio.to_thread(
+                    self._s3.upload_file,
+                    str(archive_path),
+                    self.config.s3_bucket,
+                    s3_key,
+                    ExtraArgs={
+                        "ContentType": "application/zip",
+                        "ServerSideEncryption": "AES256",
+                        "Metadata": {
+                            "content-hash": archive_hash,
+                            "snapshot-type": snapshot_type,
+                        },
+                    },
+                )
+
+                if cleanup_local_archives and archive_path.exists():
+                    await asyncio.to_thread(archive_path.unlink)
+
+                logger.info(
+                    "Uploaded %s snapshot %s (%d bytes) to s3://%s/%s",
+                    snapshot_type,
+                    archive_path,
+                    archive_size,
+                    self.config.s3_bucket,
+                    s3_key,
+                )
+                results.append(
+                    SnapshotTransferResult(
+                        snapshot_name=Path(s3_key).name,
+                        s3_key=s3_key,
+                        archive_path=archive_path,
+                        size_bytes=archive_size,
+                        content_hash=archive_hash,
+                        success=True,
+                    )
+                )
+
+            except (ClientError, BotoCoreError) as e:
+                if isinstance(e, ClientError):
+                    error_code = e.response["Error"]["Code"]
+                    logger.warning(
+                        "S3 error uploading %s snapshot (%s), will retry if attempts remain",
+                        snapshot_type,
+                        error_code,
+                    )
+                else:
+                    logger.warning(
+                        "BotoCore error uploading %s snapshot, will retry if attempts remain",
+                        snapshot_type,
+                    )
+                raise
+            except Exception as e:
+                logger.exception("Unexpected error uploading %s snapshot", snapshot_type)
+                results.append(
+                    SnapshotTransferResult(
+                        snapshot_name=Path(s3_key).name,
+                        s3_key=s3_key,
+                        archive_path=archive_path,
+                        size_bytes=0,
+                        content_hash="",
+                        success=False,
+                        error=str(e),
+                    )
+                )
+
+        return results
+
+    def _safe_extract_archive(self, archive_path: Path, destination_dir: Path) -> None:
+        """Extract archive with path traversal protection."""
+        destination_dir.mkdir(parents=True, exist_ok=True)
+        destination_root = destination_dir.resolve()
+
+        db_target = self.config.db_path
+        chroma_target = self.config.chroma_dir
+
+        with zipfile.ZipFile(archive_path, mode="r") as bundle:
+            members = bundle.infolist()
+            has_db = False
+            has_chroma = False
+
+            for member in members:
+                member_name = member.filename
+                member_path = Path(member_name)
+                if member_path.is_absolute():
+                    raise ValueError(f"Unsafe archive path: {member_name}")
+
+                target_path = (destination_dir / member_name).resolve()
+                if not target_path.is_relative_to(destination_root):
+                    raise ValueError(f"Unsafe archive path traversal: {member_name}")
+
+                normalized_name = member_name.rstrip("/")
+                if normalized_name == self.config.db_filename:
+                    has_db = True
+                if normalized_name.startswith(f"{self.config.chroma_subdir}/"):
+                    has_chroma = True
+
+            if not has_db:
+                raise ValueError("Knowledge pack archive missing SQLite database")
+            if not has_chroma:
+                raise ValueError("Knowledge pack archive missing ChromaDB data")
+
+            if db_target.exists():
+                db_target.unlink()
+            if chroma_target.exists():
+                shutil.rmtree(chroma_target)
+
+            bundle.extractall(path=destination_dir)
+
+    @retry(
+        retry=retry_if_exception_type((ClientError, BotoCoreError)),
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(multiplier=1, min=2, max=30),
+        before_sleep=before_sleep_log(logger, logging.WARNING),
+        reraise=True,
+    )
+    async def upload_knowledge_pack(
+        self,
+        module: str,
+        version: str,
+        submodule: str | None = None,
+        archive_path: Path | None = None,
+    ) -> KnowledgePackTransferResult:
+        """Zip local SQLite+ChromaDB data and upload as a single S3 object."""
+        local_archive = archive_path or self.config.get_local_pack_path(
+            module=module,
+            version=version,
+            submodule=submodule,
+        )
+        s3_key = self.config.get_knowledge_pack_key(
+            module=module,
+            version=version,
+            submodule=submodule,
+        )
+
+        try:
+            archive_size, archive_hash = await asyncio.to_thread(
+                self._create_knowledge_pack_archive,
+                local_archive,
+            )
+
+            await asyncio.to_thread(
+                self._s3.upload_file,
+                str(local_archive),
+                self.config.s3_bucket,
+                s3_key,
+                ExtraArgs={
+                    "ContentType": "application/zip",
+                    "ServerSideEncryption": "AES256",
+                    "Metadata": {
+                        "content-hash": archive_hash,
+                        "pack-type": "sqlite-chromadb",
+                    },
+                },
+            )
+
+            logger.info(
+                "Uploaded knowledge pack %s (%d bytes) to s3://%s/%s",
+                local_archive,
+                archive_size,
+                self.config.s3_bucket,
+                s3_key,
+            )
+            return KnowledgePackTransferResult(
+                s3_key=s3_key,
+                archive_path=local_archive,
+                size_bytes=archive_size,
+                content_hash=archive_hash,
+                success=True,
+            )
+
+        except (ClientError, BotoCoreError) as e:
+            if isinstance(e, ClientError):
+                error_code = e.response["Error"]["Code"]
+                logger.warning(
+                    "S3 error uploading knowledge pack (%s), will retry if attempts remain",
+                    error_code,
+                )
+            else:
+                logger.warning("BotoCore error uploading knowledge pack, will retry if attempts remain")
+            raise
+        except Exception as e:
+            logger.exception("Unexpected error uploading knowledge pack to %s", s3_key)
+            return KnowledgePackTransferResult(
+                s3_key=s3_key,
+                archive_path=local_archive,
+                size_bytes=0,
+                content_hash="",
+                success=False,
+                error=str(e),
+            )
+
+    @retry(
+        retry=retry_if_exception_type((ClientError, BotoCoreError)),
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(multiplier=1, min=2, max=30),
+        before_sleep=before_sleep_log(logger, logging.WARNING),
+        reraise=True,
+    )
+    async def download_knowledge_pack(
+        self,
+        module: str,
+        version: str,
+        submodule: str | None = None,
+        cleanup_archive: bool = True,
+    ) -> KnowledgePackTransferResult:
+        """Download and extract a zipped knowledge pack into local data directories."""
+        s3_key = self.config.get_knowledge_pack_key(
+            module=module,
+            version=version,
+            submodule=submodule,
+        )
+        local_archive = self.config.get_local_pack_path(
+            module=module,
+            version=version,
+            submodule=submodule,
+        )
+        local_archive.parent.mkdir(parents=True, exist_ok=True)
+
+        try:
+            def _download_blob() -> tuple[bytes, dict[str, str]]:
+                response = self._s3.get_object(
+                    Bucket=self.config.s3_bucket,
+                    Key=s3_key,
+                )
+                content = response["Body"].read()
+                metadata = response.get("Metadata", {})
+                return content, metadata
+
+            content, metadata = await asyncio.to_thread(_download_blob)
+            await asyncio.to_thread(local_archive.write_bytes, content)
+
+            archive_hash = compute_hash(content)
+            archive_size = len(content)
+            expected_hash = metadata.get("content-hash")
+
+            if expected_hash and expected_hash != archive_hash:
+                raise ValueError(
+                    f"Knowledge pack hash mismatch: expected {expected_hash}, got {archive_hash}",
+                )
+
+            await asyncio.to_thread(
+                self._safe_extract_archive,
+                local_archive,
+                self.config.local_data_dir,
+            )
+
+            if cleanup_archive and local_archive.exists():
+                await asyncio.to_thread(local_archive.unlink)
+
+            logger.info(
+                "Downloaded and extracted knowledge pack from s3://%s/%s",
+                self.config.s3_bucket,
+                s3_key,
+            )
+            return KnowledgePackTransferResult(
+                s3_key=s3_key,
+                archive_path=local_archive,
+                size_bytes=archive_size,
+                content_hash=archive_hash,
+                extracted_to=self.config.local_data_dir,
+                success=True,
+            )
+
+        except ClientError as e:
+            error_code = e.response["Error"]["Code"]
+            if error_code == "NoSuchKey":
+                logger.warning("Knowledge pack not found: %s", s3_key)
+                return KnowledgePackTransferResult(
+                    s3_key=s3_key,
+                    archive_path=local_archive,
+                    size_bytes=0,
+                    content_hash="",
+                    success=False,
+                    error=f"Knowledge pack not found: {s3_key}",
+                )
+
+            logger.warning(
+                "S3 error downloading knowledge pack (%s), will retry if attempts remain",
+                error_code,
+            )
+            raise
+        except BotoCoreError:
+            logger.warning("BotoCore error downloading knowledge pack, will retry if attempts remain")
+            raise
+        except Exception as e:
+            logger.exception("Unexpected error downloading knowledge pack from %s", s3_key)
+            return KnowledgePackTransferResult(
+                s3_key=s3_key,
+                archive_path=local_archive,
+                size_bytes=0,
+                content_hash="",
+                success=False,
+                error=str(e),
+            )
     
     @retry(
         retry=retry_if_exception_type((ClientError, BotoCoreError)),
@@ -551,6 +991,8 @@ class S3SyncService:
 
 __all__ = [
     "DownloadResult",
+    "KnowledgePackTransferResult",
+    "SnapshotTransferResult",
     "SyncResult",
     "S3SyncService",
 ]

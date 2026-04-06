@@ -2,7 +2,7 @@
 
 Provides commands for:
 - Scraping Spring docs into S3
-- Syncing S3 docs into local SQLite cache
+- Syncing knowledge packs or manifests from S3 into local stores
 - Indexing local docs into ChromaDB
 - Placeholder server command (not implemented yet)
 """
@@ -23,6 +23,7 @@ from everspring_mcp.scraper.pipeline import PipelineConfig, ScraperPipeline
 from everspring_mcp.scraper.registry import SubmoduleRegistry
 from everspring_mcp.sync.config import SyncConfig
 from everspring_mcp.sync.orchestrator import SyncOrchestrator
+from everspring_mcp.sync.s3_sync import S3SyncService
 from everspring_mcp.storage.repository import StorageManager
 from everspring_mcp.vector.chroma_client import ChromaClient
 from everspring_mcp.vector.config import VectorConfig
@@ -104,7 +105,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sync = subparsers.add_parser(
         "sync",
-        help="Sync docs from S3 into local SQLite cache",
+        help="Sync raw docs or upload DB snapshots",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     sync.add_argument("--module", required=False, help="Spring module (e.g., spring-boot)")
@@ -115,7 +116,17 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Sync all discovered module/submodule/version targets from config\\module_submodule_urls.csv",
     )
-    sync.add_argument("--force", action="store_true", help="Force sync even if manifest unchanged")
+    sync.add_argument(
+        "--mode",
+        choices=["manifest", "snapshot-upload"],
+        default="manifest",
+        help="Sync mode (manifest downloads raw docs; snapshot-upload backs up local SQLite+Chroma)",
+    )
+    sync.add_argument(
+        "--force",
+        action="store_true",
+        help="Force sync even if manifest unchanged (manifest mode only)",
+    )
     sync.add_argument("--s3-bucket", default=None, help="S3 bucket override")
     sync.add_argument("--s3-region", default=None, help="S3 region override")
     sync.add_argument("--s3-prefix", default=None, help="S3 key prefix override")
@@ -263,7 +274,7 @@ async def _run_scrape(args: argparse.Namespace) -> int:
         config = PipelineConfig(
             s3_bucket=args.s3_bucket or "everspring-mcp-kb",
             aws_region=args.s3_region or "eu-central-1",
-            s3_prefix=args.s3_prefix or "docs",
+            s3_prefix=args.s3_prefix or "spring-docs/raw-data",
             enable_hash_check=not args.no_hash_check,
         )
     else:
@@ -329,51 +340,36 @@ async def _run_scrape(args: argparse.Namespace) -> int:
     return 0 if failed == 0 else 1
 
 
-async def _run_sync(args: argparse.Namespace) -> int:
-    config = SyncConfig.from_env()
-    updates: dict[str, Any] = {}
-    if args.s3_bucket:
-        updates["s3_bucket"] = args.s3_bucket
-    if args.s3_region:
-        updates["s3_region"] = args.s3_region
-    if args.s3_prefix:
-        updates["s3_prefix"] = args.s3_prefix
-    if args.data_dir:
-        updates["local_data_dir"] = args.data_dir
-    if updates:
-        config = config.model_copy(update=updates)
+def _load_sync_targets_from_matrix(matrix_path: Path) -> list[tuple[str, str, str | None]]:
+    """Load deduplicated sync targets from module/submodule CSV."""
+    if not matrix_path.exists():
+        raise SystemExit(f"CSV not found: {matrix_path}")
 
-    if args.all and any([args.module, args.version, args.submodule]):
-        raise SystemExit("--all cannot be combined with --module/--version/--submodule")
-    if args.submodule and not args.module:
-        raise SystemExit("--submodule requires --module")
-    if not args.all and (not args.module or not args.version):
-        raise SystemExit("sync requires --module and --version, or use --all")
+    import csv
 
+    targets: list[tuple[str, str, str | None]] = []
+    seen: set[tuple[str, str, str | None]] = set()
+    with matrix_path.open("r", encoding="utf-8", newline="") as fh:
+        reader = csv.DictReader(fh)
+        for row in reader:
+            module = (row.get("module") or "").strip()
+            version = (row.get("version") or "").strip()
+            submodule = (row.get("submodule") or "").strip() or None
+            if not module or not version:
+                continue
+            key = (module, version, submodule)
+            if key in seen:
+                continue
+            seen.add(key)
+            targets.append(key)
+    return targets
+
+
+async def _run_manifest_sync(args: argparse.Namespace, config: SyncConfig) -> int:
+    """Run legacy manifest-based incremental sync."""
     async with SyncOrchestrator(config) as orchestrator:
         if args.all:
-            matrix_path = Path("config") / "module_submodule_urls.csv"
-            if not matrix_path.exists():
-                raise SystemExit(f"CSV not found: {matrix_path}")
-
-            import csv
-
-            targets: list[tuple[str, str, str | None]] = []
-            with matrix_path.open("r", encoding="utf-8", newline="") as fh:
-                reader = csv.DictReader(fh)
-                seen: set[tuple[str, str, str | None]] = set()
-                for row in reader:
-                    module = (row.get("module") or "").strip()
-                    version = (row.get("version") or "").strip()
-                    submodule = (row.get("submodule") or "").strip() or None
-                    if not module or not version:
-                        continue
-                    key = (module, version, submodule)
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    targets.append(key)
-
+            targets = _load_sync_targets_from_matrix(Path("config") / "module_submodule_urls.csv")
             results = []
             for module, version, submodule in targets:
                 res = await orchestrator.sync_module(
@@ -385,6 +381,7 @@ async def _run_sync(args: argparse.Namespace) -> int:
                 results.append(res)
 
             summary = {
+                "mode": "manifest",
                 "targets": len(results),
                 "completed": sum(1 for r in results if r.status.value == "completed"),
                 "failed": sum(1 for r in results if r.status.value == "failed"),
@@ -398,7 +395,7 @@ async def _run_sync(args: argparse.Namespace) -> int:
                 print(json.dumps(summary, indent=2))
             else:
                 print(
-                    f"Sync-all: {summary['completed']}/{summary['targets']} completed, "
+                    f"Sync-all (manifest): {summary['completed']}/{summary['targets']} completed, "
                     f"{summary['failed']} failed "
                     f"(+{summary['files_added']} ~{summary['files_modified']} -{summary['files_removed']}, "
                     f"{summary['bytes_downloaded']} bytes)"
@@ -420,7 +417,7 @@ async def _run_sync(args: argparse.Namespace) -> int:
         print(result.model_dump_json(indent=2))
     else:
         print(
-            f"Sync status: {result.status.value} "
+            f"Sync status (manifest): {result.status.value} "
             f"(+{result.files_added} ~{result.files_modified} -{result.files_removed}, "
             f"{result.bytes_downloaded} bytes)"
         )
@@ -429,6 +426,76 @@ async def _run_sync(args: argparse.Namespace) -> int:
             for err in result.errors:
                 print(f"- {err}")
     return 0 if result.status.value == "completed" else 1
+
+
+async def _run_sync(args: argparse.Namespace) -> int:
+    config = SyncConfig.from_env()
+    updates: dict[str, Any] = {}
+    if args.s3_bucket:
+        updates["s3_bucket"] = args.s3_bucket
+    if args.s3_region:
+        updates["s3_region"] = args.s3_region
+    if args.s3_prefix:
+        updates["s3_prefix"] = args.s3_prefix
+    if args.data_dir:
+        updates["local_data_dir"] = args.data_dir
+    if updates:
+        config = config.model_copy(update=updates)
+
+    if args.mode == "snapshot-upload":
+        if args.force:
+            raise SystemExit("--force is only supported with --mode manifest")
+        if any([args.all, args.module, args.version, args.submodule]):
+            raise SystemExit(
+                "--mode snapshot-upload does not accept --all/--module/--version/--submodule"
+            )
+
+        s3_service = S3SyncService(config)
+        snapshot_results = await s3_service.upload_db_snapshots()
+
+        summary = {
+            "mode": args.mode,
+            "snapshots": len(snapshot_results),
+            "completed": sum(1 for r in snapshot_results if r.success),
+            "failed": sum(1 for r in snapshot_results if not r.success),
+            "bytes_uploaded": sum(r.size_bytes for r in snapshot_results if r.success),
+            "results": [
+                {
+                    "snapshot_name": r.snapshot_name,
+                    "s3_key": r.s3_key,
+                    "size_bytes": r.size_bytes,
+                    "content_hash": r.content_hash,
+                    "success": r.success,
+                    "error": r.error,
+                }
+                for r in snapshot_results
+            ],
+            "errors": [f"{r.snapshot_name} -> {r.error}" for r in snapshot_results if not r.success and r.error],
+        }
+
+        if args.json:
+            print(json.dumps(summary, indent=2))
+        else:
+            status = "completed" if summary["failed"] == 0 else "failed"
+            print(
+                f"Sync status ({args.mode}): {status} "
+                f"({summary['completed']}/{summary['snapshots']} uploaded, "
+                f"{summary['bytes_uploaded']} bytes)"
+            )
+            if summary["errors"]:
+                print("Errors:")
+                for err in summary["errors"]:
+                    print(f"- {err}")
+        return 0 if summary["failed"] == 0 else 1
+
+    if args.all and any([args.module, args.version, args.submodule]):
+        raise SystemExit("--all cannot be combined with --module/--version/--submodule")
+    if args.submodule and not args.module:
+        raise SystemExit("--submodule requires --module")
+    if not args.all and (not args.module or not args.version):
+        raise SystemExit("sync requires --module and --version, or use --all")
+
+    return await _run_manifest_sync(args, config)
 
 
 async def _run_status(args: argparse.Namespace) -> int:

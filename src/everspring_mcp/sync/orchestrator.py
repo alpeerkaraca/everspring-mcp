@@ -218,7 +218,7 @@ class SyncOrchestrator:
                 if self._is_metadata_path(relative_path):
                     if download.success:
                         metadata = self._load_metadata(download.local_path)
-                        url_hash = Path(relative_path).stem
+                        url_hash = self._extract_url_hash(relative_path)
                         metadata_cache[url_hash] = metadata
                     else:
                         result.errors.append(download.error or f"Failed: {download.s3_key}")
@@ -234,7 +234,9 @@ class SyncOrchestrator:
                 )
                 
                 if download.success:
-                    url_hash = Path(self._relative_path(download.s3_key, module, version, submodule)).stem
+                    url_hash = self._extract_url_hash(
+                        self._relative_path(download.s3_key, module, version, submodule)
+                    )
                     metadata = metadata_cache.get(url_hash)
                     await self._process_downloaded_file(
                         download, module, version, metadata, submodule=submodule,
@@ -329,7 +331,7 @@ class SyncOrchestrator:
         
         # Extract relative path within module/version
         relative_path = self._relative_path(download.s3_key, module, version, submodule)
-        url_hash = Path(relative_path).stem
+        url_hash = self._extract_url_hash(relative_path)
         
         # Read file to extract title (first heading)
         title = await self._extract_title(download.local_path)
@@ -451,18 +453,33 @@ class SyncOrchestrator:
         submodule: str | None = None,
     ) -> str:
         """Get relative path within module/version."""
+        prefix = f"{self.config.get_raw_data_prefix(module, version, submodule=submodule)}/"
         if submodule:
-            prefix = f"{self.config.s3_prefix}/{module}/{submodule}/{version}/"
+            legacy_prefix = f"{self.config.s3_prefix}/{module}/{submodule}/{version}/"
         else:
-            prefix = f"{self.config.s3_prefix}/{module}/{version}/"
+            legacy_prefix = f"{self.config.s3_prefix}/{module}/{version}/"
         if s3_key.startswith(prefix):
             return s3_key[len(prefix):]
+        if s3_key.startswith(legacy_prefix):
+            return s3_key[len(legacy_prefix):]
         return s3_key.split("/")[-1]
 
     @staticmethod
     def _is_metadata_path(relative_path: str) -> bool:
         """Check if relative path is metadata JSON."""
-        return relative_path.startswith("metadata/") and relative_path.endswith(".json")
+        normalized = relative_path.replace("\\", "/")
+        if normalized.startswith("metadata/") and normalized.endswith(".json"):
+            return True
+        return Path(normalized).name == "metadata.json"
+
+    @staticmethod
+    def _extract_url_hash(relative_path: str) -> str:
+        """Extract stable URL hash from relative object path."""
+        normalized = relative_path.replace("\\", "/")
+        path = Path(normalized)
+        if path.name in {"document.md", "metadata.json"} and path.parent.name:
+            return path.parent.name
+        return path.stem
 
     @staticmethod
     def _load_metadata(path: Path) -> dict:

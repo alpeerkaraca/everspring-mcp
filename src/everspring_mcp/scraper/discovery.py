@@ -97,6 +97,10 @@ class DiscoveryConfig(BaseModel):
         default_factory=lambda: SKIP_EXTENSIONS.copy(),
         description="File extensions to skip",
     )
+    suppress_http_404: bool = Field(
+        default=True,
+        description="Drop links that return HTTP 404 during discovery traversal",
+    )
     browser_config: BrowserConfig = Field(
         default_factory=BrowserConfig,
         description="Browser configuration",
@@ -682,6 +686,19 @@ class SpringDocDiscovery:
                                 self._duplicates += 1
                                 
                     except (NavigationError, ContentExtractionError) as e:
+                        if (
+                            isinstance(e, NavigationError)
+                            and self.config.suppress_http_404
+                            and e.status_code == 404
+                        ):
+                            if self._discovered and self._discovered[-1].url == url:
+                                self._discovered.pop()
+                            else:
+                                self._discovered = [
+                                    link for link in self._discovered if link.url != url
+                                ]
+                            logger.info("Suppressed 404 discovery link: %s", url)
+                            continue
                         logger.warning(f"Failed to extract links from {url}: {e}")
                         continue
             

@@ -11,19 +11,19 @@ This module provides common test fixtures:
 from __future__ import annotations
 
 import os
-from typing import Any, AsyncGenerator, Generator
-from unittest.mock import AsyncMock, MagicMock, patch
+from collections.abc import Generator
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock
 
 import boto3
 import pytest
 from moto import mock_aws
 
-from everspring_mcp.models.content import ContentType, ScrapedPage
+from everspring_mcp.models.content import ContentType
 from everspring_mcp.models.spring import SpringModule, SpringVersion
 from everspring_mcp.scraper.browser import BrowserConfig, SpringBrowser
 from everspring_mcp.scraper.parser import ParserConfig, SpringDocParser
 from everspring_mcp.scraper.pipeline import PipelineConfig, ScrapeTarget
-
 
 # =============================================================================
 # Sample HTML Fixtures
@@ -312,7 +312,7 @@ def mock_s3_with_content(mock_s3: Any) -> Any:
     """Mock S3 with pre-existing content for hash checking tests."""
     content = "# Existing Content\n\nThis is existing content."
     content_hash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-    
+
     mock_s3.put_object(
         Bucket="test-bucket",
         Key="test-docs/spring-boot/4.0.0/existing.md",
@@ -348,19 +348,21 @@ def mock_browser(
 ) -> AsyncMock:
     """Mock SpringBrowser that returns sample HTML."""
     browser = AsyncMock(spec=SpringBrowser)
-    
+
     # Setup context manager
     browser.__aenter__ = AsyncMock(return_value=browser)
     browser.__aexit__ = AsyncMock(return_value=None)
-    
+
     # Setup methods
     browser.navigate = AsyncMock(return_value=mock_browser_response)
     browser.navigate_with_retry = AsyncMock(return_value=mock_browser_response)
+    browser.fast_precheck = AsyncMock(return_value=None)
+    browser.last_precheck_hash = None
     browser.get_html = AsyncMock(return_value=sample_spring_html)
     browser.get_content = AsyncMock(return_value="Spring Boot Reference Documentation")
     browser.is_launched = True
     browser.current_url = "https://docs.spring.io/spring-boot/reference/"
-    
+
     return browser
 
 
@@ -381,13 +383,13 @@ def mock_browser_factory(mock_browser: AsyncMock) -> MagicMock:
 def pipeline_env_vars() -> Generator[None, None, None]:
     """Set environment variables for pipeline configuration."""
     original_env = os.environ.copy()
-    
+
     os.environ["EVERSPRING_S3_BUCKET"] = "test-bucket"
     os.environ["EVERSPRING_S3_PREFIX"] = "test-docs"
     os.environ["AWS_REGION"] = "us-east-1"
-    
+
     yield
-    
+
     # Restore original environment
     os.environ.clear()
     os.environ.update(original_env)
