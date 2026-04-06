@@ -1,21 +1,30 @@
 """EverSpring MCP - S3 sync service.
 
 This module provides the S3SyncService for downloading
-documents from S3 with incremental sync support.
+documents from S3 with incremental sync support and
+enterprise-grade retry logic using tenacity.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import boto3
-from botocore.exceptions import ClientError
+from botocore.exceptions import ClientError, BotoCoreError
 from pydantic import BaseModel, Field
+from tenacity import (
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+    before_sleep_log,
+)
 
 from ..models.base import compute_hash
 from ..models.sync import (
@@ -113,20 +122,36 @@ class S3SyncService:
         self._semaphore = asyncio.Semaphore(config.download_concurrency)
         logger.info(f"S3SyncService initialized in {time.perf_counter() - start:.2f}s")
     
+    @retry(
+        retry=retry_if_exception_type((ClientError, BotoCoreError)),
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(multiplier=1, min=2, max=30),
+        before_sleep=before_sleep_log(logger, logging.WARNING),
+        reraise=True,
+    )
     async def fetch_manifest(
         self,
         module: str,
         version: str,
         submodule: str | None = None,
     ) -> SyncManifest | None:
-        """Fetch manifest from S3.
+        """Fetch manifest from S3 with exponential backoff retry.
+        
+        Automatically retries on:
+        - AWS throttling (rate limiting)
+        - Transient network errors
+        - Temporary service unavailability
         
         Args:
             module: Spring module (e.g., "spring-boot")
             version: Version string (e.g., "4.0.5")
+            submodule: Optional submodule name
             
         Returns:
             Parsed manifest or None if not found
+            
+        Raises:
+            ClientError: After all retries exhausted
         """
         key = self.config.get_manifest_key(module, version, submodule=submodule)
         
@@ -148,9 +173,13 @@ class S3SyncService:
             return manifest
             
         except ClientError as e:
-            if e.response["Error"]["Code"] == "NoSuchKey":
+            error_code = e.response["Error"]["Code"]
+            # Don't retry on NoSuchKey - it's not a transient error
+            if error_code == "NoSuchKey":
                 logger.warning("Manifest not found: %s", key)
                 return None
+            # Retry on throttling and server errors
+            logger.warning(f"S3 error fetching manifest ({error_code}), will retry if attempts remain")
             raise
     
     def compute_manifest_hash(self, manifest: SyncManifest) -> str:
@@ -203,12 +232,24 @@ class S3SyncService:
         # Use existing delta computation
         return SyncDelta.compute(local_manifest, remote_manifest, module)
     
+    @retry(
+        retry=retry_if_exception_type((ClientError, BotoCoreError)),
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(multiplier=1, min=2, max=30),
+        before_sleep=before_sleep_log(logger, logging.WARNING),
+        reraise=True,
+    )
     async def download_file(
         self,
         s3_key: str,
         expected_hash: str | None = None,
     ) -> DownloadResult:
-        """Download a single file from S3.
+        """Download a single file from S3 with exponential backoff retry.
+        
+        Automatically retries on:
+        - AWS throttling (rate limiting)
+        - Transient network errors
+        - Temporary service unavailability
         
         Args:
             s3_key: S3 object key
@@ -239,6 +280,10 @@ class S3SyncService:
                 
                 # Verify hash if provided
                 if expected_hash and content_hash != expected_hash:
+                    logger.error(
+                        "Hash mismatch for %s: expected %s, got %s",
+                        s3_key, expected_hash, content_hash
+                    )
                     return DownloadResult(
                         s3_key=s3_key,
                         local_path=local_path,
@@ -264,20 +309,22 @@ class S3SyncService:
                     success=True,
                 )
                 
-            except ClientError as e:
-                error_code = e.response["Error"]["Code"]
-                error_msg = f"S3 error ({error_code}): {e.response['Error']['Message']}"
-                logger.error("Failed to download %s: %s", s3_key, error_msg)
-                
-                return DownloadResult(
-                    s3_key=s3_key,
-                    local_path=local_path,
-                    size_bytes=0,
-                    content_hash="",
-                    success=False,
-                    error=error_msg,
-                )
+            except (ClientError, BotoCoreError) as e:
+                # These will trigger tenacity retry
+                if isinstance(e, ClientError):
+                    error_code = e.response["Error"]["Code"]
+                    logger.warning(
+                        "S3 error downloading %s (%s), will retry if attempts remain",
+                        s3_key, error_code
+                    )
+                else:
+                    logger.warning(
+                        "BotoCore error downloading %s, will retry if attempts remain",
+                        s3_key
+                    )
+                raise
             except Exception as e:
+                # Non-retryable errors
                 logger.exception("Unexpected error downloading %s", s3_key)
                 return DownloadResult(
                     s3_key=s3_key,

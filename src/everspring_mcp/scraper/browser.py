@@ -4,7 +4,7 @@ This module provides SpringBrowser, an async Playwright-based browser
 for scraping Spring documentation with:
 - User-agent rotation to avoid rate limits
 - Network idle waiting for JS-rendered content
-- Retry logic with exponential backoff
+- Exponential backoff with tenacity library
 - Comprehensive error handling
 """
 
@@ -26,6 +26,15 @@ from playwright.async_api import (
     async_playwright,
 )
 from pydantic import BaseModel, ConfigDict, Field
+from tenacity import (
+    AsyncRetrying,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+    before_sleep_log,
+    retry,
+)
+import logging
 
 from everspring_mcp.scraper.exceptions import (
     BrowserLaunchError,
@@ -216,8 +225,20 @@ class SpringBrowser:
         """Get random user agent from pool."""
         return random.choice(USER_AGENTS)
     
+    @retry(
+        retry=retry_if_exception_type((NavigationTimeoutError, PlaywrightTimeoutError, PlaywrightError)),
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+        before_sleep=before_sleep_log(logger, logging.WARNING),
+        reraise=True,
+    )
     async def navigate(self, url: str) -> Response:
         """Navigate to URL and wait for network idle.
+        
+        Uses tenacity for automatic retry with exponential backoff on:
+        - Playwright timeouts
+        - Network errors
+        - Navigation failures
         
         Args:
             url: URL to navigate to
@@ -226,15 +247,15 @@ class SpringBrowser:
             Response object from navigation
             
         Raises:
-            NavigationTimeoutError: If navigation times out
-            RateLimitError: If rate limited (HTTP 429)
-            NavigationError: For other navigation failures
+            NavigationTimeoutError: If navigation times out after retries
+            RateLimitError: If rate limited (HTTP 429) - no retry
+            NavigationError: For other navigation failures after retries
         """
         if not self._page:
             raise BrowserLaunchError("Browser not launched")
         
         self._current_url = url
-        logger.info(f"Navigating to: {url}")
+        logger.debug(f"Navigating to: {url}")
         
         try:
             response = await self._page.goto(
@@ -246,7 +267,7 @@ class SpringBrowser:
             if response is None:
                 raise NavigationError("No response received", url=url)
             
-            # Check for rate limiting
+            # Check for rate limiting (don't retry, raise immediately)
             if response.status == 429:
                 retry_after = response.headers.get("retry-after")
                 retry_seconds = int(retry_after) if retry_after else None
@@ -281,57 +302,50 @@ class SpringBrowser:
         url: str,
         max_retries: int | None = None,
     ) -> Response:
-        """Navigate to URL with retry and exponential backoff.
+        """Navigate to URL with retry, exponential backoff, and rate limit handling.
+        
+        This method adds special handling for rate limits on top of the base
+        navigate() method's retry logic. When rate limited:
+        - Waits for server-specified retry-after time
+        - Rotates browser context (new user agent)
+        - Retries the request
         
         Args:
             url: URL to navigate to
-            max_retries: Override default max retries
+            max_retries: Override default max retries (for rate limits)
             
         Returns:
             Response object from navigation
             
         Raises:
-            NavigationTimeoutError: If all retries exhausted due to timeout
-            RateLimitError: If rate limited after retries
+            RateLimitError: If rate limited after all retries
+            NavigationTimeoutError: If navigation times out after retries
             NavigationError: For other persistent failures
         """
         retries = max_retries or self.config.max_retries
-        last_error: Exception | None = None
         
-        for attempt in range(retries):
-            try:
-                return await self.navigate(url)
-                
-            except RateLimitError as e:
-                last_error = e
-                wait_time = e.retry_after or self.config.rate_limit_delay
-                logger.warning(
-                    f"Rate limited on attempt {attempt + 1}/{retries}, "
-                    f"waiting {wait_time}s"
-                )
-                await asyncio.sleep(wait_time)
-                await self._rotate_context()
-                
-            except (NavigationError, NavigationTimeoutError) as e:
-                last_error = e
-                if attempt == retries - 1:
-                    break
-                
-                # Exponential backoff with jitter
-                wait_time = (
-                    self.config.base_retry_delay * (2 ** attempt)
-                    + random.uniform(0, 1)
-                )
-                logger.warning(
-                    f"Navigation failed on attempt {attempt + 1}/{retries}, "
-                    f"retrying in {wait_time:.2f}s: {e}"
-                )
-                await asyncio.sleep(wait_time)
+        async for attempt in AsyncRetrying(
+            retry=retry_if_exception_type(RateLimitError),
+            stop=stop_after_attempt(retries),
+            wait=wait_exponential(multiplier=1, min=1, max=60),
+            before_sleep=before_sleep_log(logger, logging.WARNING),
+            reraise=True,
+        ):
+            with attempt:
+                try:
+                    return await self.navigate(url)
+                except RateLimitError as e:
+                    # Handle rate limiting with context rotation
+                    wait_time = e.retry_after or self.config.rate_limit_delay
+                    logger.warning(
+                        f"Rate limited, rotating context and waiting {wait_time}s before retry"
+                    )
+                    await asyncio.sleep(wait_time)
+                    await self._rotate_context()
+                    raise  # Re-raise to trigger tenacity retry
         
-        # Re-raise last error after all retries exhausted
-        if last_error:
-            raise last_error
-        raise NavigationError("Navigation failed with unknown error", url=url)
+        # Should never reach here due to reraise=True
+        raise NavigationError("Unexpected retry state", url=url)
     
     async def get_html(self) -> str:
         """Get full page HTML content.

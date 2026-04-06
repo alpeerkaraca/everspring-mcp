@@ -703,6 +703,7 @@ dependencies = [
     { name = "pydantic" },
     { name = "rank-bm25" },
     { name = "sentence-transformers" },
+    { name = "tenacity" },
     { name = "tiktoken" },
 ]
 
@@ -743,6 +744,7 @@ requires-dist = [
     { name = "rank-bm25", specifier = ">=0.2.2" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.1.0" },
     { name = "sentence-transformers", specifier = ">=2.7.0" },
+    { name = "tenacity", specifier = ">=8.2.0" },
     { name = "tiktoken", specifier = ">=0.7.0" },
 ]
 provides-extras = ["dev"]

@@ -16,6 +16,7 @@ EverSpring solves this by creating a verified bridge between official Spring doc
 - **Data Integrity:** Content validated via SHA-256 hashing before ingestion.
 - **Type Safety:** Strict use of Pydantic models for all data structures (no raw dicts).
 - **Asynchronous First:** Use `asyncio` and `httpx` for all I/O bound operations.
+- **Enterprise Resilience:** Exponential backoff retry logic using tenacity for all I/O operations (Playwright, S3).
 
 ## 🔧 Key Features
 - **Hybrid Search:** Combines dense retrieval (Cosine Similarity) with sparse retrieval (BM25) using Reciprocal Rank Fusion.
