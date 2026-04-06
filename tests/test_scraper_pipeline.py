@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 from typing import Any
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import boto3
@@ -31,6 +32,7 @@ from everspring_mcp.scraper.pipeline import (
     ScraperPipeline,
     lambda_handler,
 )
+from everspring_mcp.scraper.registry import SubmoduleRegistry
 
 
 # =============================================================================
@@ -81,7 +83,7 @@ class TestScrapeTarget:
             patch=0,
         )
         
-        assert target.s3_key_prefix == "spring-boot/4.1.0"
+        assert target.s3_key_prefix_for(target.version) == "spring-boot/4.1.0"
 
     def test_scrape_target_invalid_version(self) -> None:
         """Test ScrapeTarget rejects invalid Spring versions."""
@@ -90,6 +92,8 @@ class TestScrapeTarget:
                 url="https://docs.spring.io/spring-boot/reference/",
                 module=SpringModule.BOOT,
                 major=3,  # Boot requires 4+
+                minor=0,
+                patch=5,
             )
 
     def test_scrape_target_invalid_url(self) -> None:
@@ -99,7 +103,18 @@ class TestScrapeTarget:
                 url="not-a-valid-url",
                 module=SpringModule.BOOT,
                 major=4,
+                minor=0,
+                patch=5,
             )
+
+    def test_scrape_target_auto_version(self) -> None:
+        """Test ScrapeTarget supports auto-detected version."""
+        target = ScrapeTarget(
+            url="https://docs.spring.io/spring-boot/reference/",
+            module=SpringModule.BOOT,
+            major=None,
+        )
+        assert target.version is None
 
     def test_scrape_target_content_type_default(self) -> None:
         """Test ScrapeTarget defaults to REFERENCE content type."""
@@ -107,6 +122,8 @@ class TestScrapeTarget:
             url="https://docs.spring.io/spring-boot/reference/",
             module=SpringModule.BOOT,
             major=4,
+            minor=0,
+            patch=5,
         )
         
         assert target.content_type == ContentType.REFERENCE
@@ -138,7 +155,35 @@ class TestPipelineConfig:
         
         assert config.s3_prefix == "docs"
         assert config.aws_region == "us-east-1"
-        assert config.enable_hash_check is True
+
+
+class TestSubmoduleRegistry:
+    """Tests for submodule registry loading."""
+
+    def test_registry_load(self, tmp_path: Path) -> None:
+        registry_path = tmp_path / "submodules.json"
+        registry_path.write_text(
+            json.dumps(
+                {
+                    "targets": [
+                        {
+                            "module_key": "spring-data",
+                            "submodule_key": "redis",
+                            "base_url": "https://docs.spring.io/spring-data/redis/reference/",
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        registry = SubmoduleRegistry.load(registry_path)
+        assert len(registry.targets) == 1
+        target = registry.targets[0]
+        assert target.module_key == SpringModule.DATA
+        assert target.submodule_key == "redis"
+        assert target.base_url.startswith("https://")
+        assert target.version_selector == "span.version"
 
     def test_config_from_env(self, pipeline_env_vars: None) -> None:
         """Test PipelineConfig.from_env() loads from environment."""
@@ -354,6 +399,8 @@ class TestScraperPipeline:
             url="https://docs.spring.io/spring-boot/reference/",
             module=SpringModule.BOOT,
             major=4,
+            minor=0,
+            patch=5,
         )
         
         with patch(
@@ -367,6 +414,8 @@ class TestScraperPipeline:
         assert result.content_hash is not None
         assert result.s3_ref is not None
         assert result.error_message is None
+        assert result.target.version is not None
+        assert result.target.version.version_string == "4.0.5"
 
     @pytest.mark.asyncio
     async def test_scrape_url_skipped_unchanged(
@@ -381,7 +430,7 @@ class TestScraperPipeline:
         
         # Pre-compute the hash that will be generated
         parser = SpringDocParser()
-        version = SpringVersion(module=SpringModule.BOOT, major=4)
+        version = SpringVersion(module=SpringModule.BOOT, major=4, minor=0, patch=5)
         scraped = parser.parse(
             html=sample_spring_html,
             url="https://docs.spring.io/spring-boot/reference/",
@@ -391,7 +440,7 @@ class TestScraperPipeline:
         
         # Upload existing content with same hash
         url_hash = compute_hash("https://docs.spring.io/spring-boot/reference/")[:16]
-        key = f"test-docs/spring-boot/4.0.0/{url_hash}.md"
+        key = f"test-docs/spring-boot/4.0.5/{url_hash}.md"
         
         mock_s3.put_object(
             Bucket="test-bucket",
@@ -404,6 +453,8 @@ class TestScraperPipeline:
             url="https://docs.spring.io/spring-boot/reference/",
             module=SpringModule.BOOT,
             major=4,
+            minor=0,
+            patch=5,
         )
         
         with patch(
@@ -437,6 +488,8 @@ class TestScraperPipeline:
             url="https://docs.spring.io/spring-boot/reference/",
             module=SpringModule.BOOT,
             major=4,
+            minor=0,
+            patch=5,
         )
         
         with patch(
@@ -463,6 +516,8 @@ class TestScraperPipeline:
                 url=f"https://docs.spring.io/spring-boot/reference/page{i}/",
                 module=SpringModule.BOOT,
                 major=4,
+                minor=0,
+                patch=5,
             )
             for i in range(3)
         ]
@@ -490,6 +545,66 @@ class TestScraperPipeline:
         
         assert results == []
 
+    @pytest.mark.asyncio
+    async def test_discover_passes_content_type_to_discovery(
+        self,
+        mock_s3: Any,
+        pipeline_config: PipelineConfig,
+    ) -> None:
+        """Pipeline should forward content_type to discovery."""
+        from everspring_mcp.scraper.discovery import (
+            DiscoveredLink,
+            DiscoveryResult,
+            DiscoveryStatus,
+        )
+
+        version = SpringVersion(module=SpringModule.BOOT, major=4, minor=0, patch=5)
+        fake_result = DiscoveryResult(
+            entry_url="https://docs.spring.io/spring-boot/4.0.5/api/",
+            module=SpringModule.BOOT,
+            version=version,
+            links=[
+                DiscoveredLink(
+                    url="https://docs.spring.io/spring-boot/4.0.5/api/",
+                    depth=0,
+                )
+            ],
+            total_found=1,
+            duplicates_removed=0,
+            filtered_out=0,
+            status=DiscoveryStatus.COMPLETED,
+        )
+
+        with patch("everspring_mcp.scraper.discovery.SpringDocDiscovery") as discovery_cls, patch.object(
+            DiscoveryResult,
+            "to_scrape_targets",
+            return_value=[],
+        ) as to_targets:
+            discovery_instance = MagicMock()
+            discovery_instance.discover = AsyncMock(return_value=fake_result)
+            discovery_cls.return_value = discovery_instance
+
+            pipeline = ScraperPipeline(pipeline_config)
+            pipeline.process_batch = AsyncMock(return_value=[])  # type: ignore[method-assign]
+            await pipeline.discover_and_scrape(
+                entry_url="https://docs.spring.io/spring-boot/4.0.5/api/",
+                module=SpringModule.BOOT,
+                version=version,
+                content_type=ContentType.API_DOC,
+                concurrency=1,
+            )
+
+            _, kwargs = discovery_instance.discover.call_args
+            assert kwargs["content_type"] == ContentType.API_DOC
+            to_targets.assert_called_once()
+            args, kwargs = to_targets.call_args
+            passed_content_type = kwargs.get("content_type")
+            if passed_content_type is None and args:
+                passed_content_type = args[0]
+            assert passed_content_type == ContentType.API_DOC
+            assert kwargs["submodule"] is None
+            assert kwargs["auto_version"] is False
+
 
 # =============================================================================
 # ScrapeResult Tests
@@ -507,6 +622,8 @@ class TestScrapeResult:
             url="https://example.com/",
             module=SpringModule.BOOT,
             major=4,
+            minor=0,
+            patch=5,
         )
         s3_ref = S3ObjectRef(
             bucket="test-bucket",
@@ -529,6 +646,8 @@ class TestScrapeResult:
             url="https://example.com/",
             module=SpringModule.BOOT,
             major=4,
+            minor=0,
+            patch=5,
         )
         
         result = ScrapeResult.skipped(
@@ -545,6 +664,8 @@ class TestScrapeResult:
             url="https://example.com/",
             module=SpringModule.BOOT,
             major=4,
+            minor=0,
+            patch=5,
         )
         
         result = ScrapeResult.failed(
@@ -578,6 +699,8 @@ class TestLambdaHandler:
                     "url": "https://docs.spring.io/spring-boot/reference/",
                     "module": "spring-boot",
                     "major": 4,
+                    "minor": 0,
+                    "patch": 5,
                 }
             ],
             "concurrency": 1,
@@ -618,6 +741,8 @@ class TestLambdaHandler:
                     "url": "not-a-url",  # Invalid
                     "module": "spring-boot",
                     "major": 4,
+                    "minor": 0,
+                    "patch": 5,
                 },
             ],
         }
@@ -640,6 +765,8 @@ class TestLambdaHandler:
                     "url": "https://example.com/",
                     "module": "spring-boot",
                     "major": 4,
+                    "minor": 0,
+                    "patch": 5,
                 }
             ],
         }
@@ -662,6 +789,8 @@ class TestLambdaHandler:
                     "url": "https://docs.spring.io/spring-boot/reference/",
                     "module": "spring-boot",
                     "major": 4,
+                    "minor": 0,
+                    "patch": 5,
                 }
             ],
         }
@@ -707,6 +836,8 @@ class TestPipelineIntegration:
             url="https://docs.spring.io/spring-boot/reference/",
             module=SpringModule.BOOT,
             major=4,
+            minor=0,
+            patch=5,
         )
         
         with patch(

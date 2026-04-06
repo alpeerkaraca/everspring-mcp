@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -27,12 +27,13 @@ from ..models.sync import (
     SyncStatus,
 )
 from ..models.spring import SpringModule
+from ..utils.logging import get_logger
 from .config import SyncConfig
 
 if TYPE_CHECKING:
     from mypy_boto3_s3 import S3Client
 
-logger = logging.getLogger(__name__)
+logger = get_logger("sync.s3")
 
 
 class DownloadResult(BaseModel):
@@ -103,17 +104,20 @@ class S3SyncService:
             config: Sync configuration
             s3_client: Optional S3 client (creates one if not provided)
         """
+        start = time.perf_counter()
         self.config = config
         self._s3: S3Client = s3_client or boto3.client(
             "s3",
             region_name=config.s3_region,
         )
         self._semaphore = asyncio.Semaphore(config.download_concurrency)
+        logger.info(f"S3SyncService initialized in {time.perf_counter() - start:.2f}s")
     
     async def fetch_manifest(
         self,
         module: str,
         version: str,
+        submodule: str | None = None,
     ) -> SyncManifest | None:
         """Fetch manifest from S3.
         
@@ -124,7 +128,7 @@ class S3SyncService:
         Returns:
             Parsed manifest or None if not found
         """
-        key = self.config.get_manifest_key(module, version)
+        key = self.config.get_manifest_key(module, version, submodule=submodule)
         
         try:
             response = await asyncio.to_thread(
@@ -289,6 +293,7 @@ class S3SyncService:
         delta: SyncDelta,
         module: str,
         version: str,
+        submodule: str | None = None,
     ) -> list[DownloadResult]:
         """Download all changed files from a delta.
         
@@ -320,7 +325,7 @@ class S3SyncService:
         # Download concurrently
         tasks = [
             self.download_file(
-                s3_key=self.config.get_s3_key(module, version, change.path),
+                s3_key=self.config.get_s3_key(module, version, change.path, submodule=submodule),
                 expected_hash=change.new_hash,
             )
             for change in to_download
@@ -364,6 +369,7 @@ class S3SyncService:
         self,
         module: str,
         version: str,
+        submodule: str | None = None,
     ) -> list[dict[str, Any]]:
         """List all files in S3 for a module/version.
         
@@ -374,7 +380,10 @@ class S3SyncService:
         Returns:
             List of S3 object metadata dicts
         """
-        prefix = f"{self.config.s3_prefix}/{module}/{version}/"
+        if submodule:
+            prefix = f"{self.config.s3_prefix}/{module}/{submodule}/{version}/"
+        else:
+            prefix = f"{self.config.s3_prefix}/{module}/{version}/"
         files: list[dict[str, Any]] = []
         
         paginator = self._s3.get_paginator("list_objects_v2")
@@ -409,6 +418,7 @@ class S3SyncService:
         self,
         module: str,
         version: str,
+        submodule: str | None = None,
     ) -> SyncManifest:
         """Build a manifest by scanning S3 objects.
         
@@ -421,8 +431,11 @@ class S3SyncService:
         Returns:
             Generated manifest
         """
-        files = await self.list_s3_files(module, version)
-        prefix = f"{self.config.s3_prefix}/{module}/{version}/"
+        files = await self.list_s3_files(module, version, submodule=submodule)
+        if submodule:
+            prefix = f"{self.config.s3_prefix}/{module}/{submodule}/{version}/"
+        else:
+            prefix = f"{self.config.s3_prefix}/{module}/{version}/"
         
         entries: list[FileEntry] = []
         total_size = 0

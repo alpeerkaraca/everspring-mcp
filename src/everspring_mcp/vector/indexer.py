@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -16,10 +17,13 @@ from ..storage.repository import StorageManager
 from ..models.metadata import SearchableDocument
 from ..models.content import ContentType
 from ..models.spring import SpringModule
+from ..utils.logging import get_logger
 from ..vector.chunking import MarkdownChunker
 from ..vector.embeddings import Embedder
 from ..vector.chroma_client import ChromaClient
 from ..vector.config import VectorConfig
+
+logger = get_logger("vector.indexer")
 
 
 @dataclass(frozen=True)
@@ -38,6 +42,7 @@ class VectorIndexer:
         config: VectorConfig | None = None,
         storage: StorageManager | None = None,
     ) -> None:
+        start = time.perf_counter()
         self.config = config or VectorConfig.from_env()
         self.chunker = MarkdownChunker(
             max_tokens=self.config.max_tokens,
@@ -50,6 +55,7 @@ class VectorIndexer:
         self.chroma = ChromaClient(self.config)
         self._storage = storage
         self._owns_storage = storage is None
+        logger.info(f"VectorIndexer initialized in {time.perf_counter() - start:.2f}s")
     
     async def __aenter__(self) -> VectorIndexer:
         self.config.ensure_directories()
@@ -73,8 +79,10 @@ class VectorIndexer:
         
         docs = await self._storage.documents.get_unindexed(limit=limit)
         if not docs:
+            logger.debug("No unindexed documents found")
             return IndexStats(documents_indexed=0, chunks_indexed=0)
         
+        logger.info(f"Indexing {len(docs)} documents")
         total_chunks = 0
         indexed_docs = 0
         for doc in docs:
@@ -112,6 +120,7 @@ class VectorIndexer:
                     content=chunk.content,
                     content_hash=chunk.content_hash,
                     module=SpringModule(doc.module),
+                    submodule=doc.submodule,
                     version_major=doc.major_version,
                     version_minor=doc.minor_version,
                     content_type=ContentType.REFERENCE,
@@ -128,17 +137,27 @@ class VectorIndexer:
             await self._storage.documents.mark_indexed([doc.id])
             total_chunks += len(chunks)
             indexed_docs += 1
+            logger.debug(f"Indexed doc {doc.id}: {len(chunks)} chunks")
         
+        logger.info(f"Indexing complete: {indexed_docs} docs, {total_chunks} chunks")
         return IndexStats(documents_indexed=indexed_docs, chunks_indexed=total_chunks)
 
     @staticmethod
     def _is_metadata_path(path: Path) -> bool:
-        return str(path).replace("\\", "/").startswith("metadata/") and path.suffix == ".json"
+        """Check if path is a metadata JSON file, not markdown."""
+        normalized = str(path).replace("\\", "/")
+        # Match paths like 'spring-boot/4.0.5/metadata/xxx.json' or 'metadata/xxx.json'
+        return "/metadata/" in normalized and path.suffix == ".json"
 
     def _metadata_path_for(self, markdown_path: Path) -> Path:
-        """Compute metadata JSON path for a markdown file."""
+        """Compute metadata JSON path for a markdown file.
+        
+        Given a markdown path like 'spring-boot/4.0.5/abc123.md',
+        returns 'docs_dir/spring-boot/4.0.5/metadata/abc123.json'.
+        """
         url_hash = markdown_path.stem
-        return self.config.docs_dir / "metadata" / f"{url_hash}.json"
+        # Metadata sits alongside markdown in a metadata/ subfolder
+        return self.config.docs_dir / markdown_path.parent / "metadata" / f"{url_hash}.json"
 
     @staticmethod
     def _load_metadata(path: Path) -> dict:

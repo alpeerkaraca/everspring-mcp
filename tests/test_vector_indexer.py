@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sys
+import types
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +41,22 @@ def test_chunking_hybrid(sample_markdown: str) -> None:
     assert all(c.content_hash for c in chunks)
 
 
+def test_chunking_removes_copied_artifacts() -> None:
+    chunker = MarkdownChunker(max_tokens=120, overlap_tokens=10)
+    markdown = """
+## Configure
+Use this snippet:
+```java
+class Demo {}
+```
+Copied!
+""".strip()
+
+    chunks = chunker.chunk(markdown)
+    assert chunks
+    assert all("Copied!" not in c.content for c in chunks)
+
+
 @pytest.mark.asyncio
 async def test_indexer_no_docs(tmp_path: Path) -> None:
     config = VectorConfig(data_dir=tmp_path, chroma_dir=tmp_path / "chroma")
@@ -59,3 +77,23 @@ async def test_embedder_batches(monkeypatch: pytest.MonkeyPatch) -> None:
     vectors = await embedder.embed_batches(["a", "b", "c"])
     assert len(vectors) == 3
     assert all(len(v) == 3 for v in vectors)
+
+
+@pytest.mark.asyncio
+async def test_prefetch_model_loads_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    load_calls = 0
+
+    class FakeSentenceTransformer:
+        def __init__(self, model_name: str) -> None:
+            del model_name
+            nonlocal load_calls
+            load_calls += 1
+
+    fake_module = types.SimpleNamespace(SentenceTransformer=FakeSentenceTransformer)
+    monkeypatch.setitem(sys.modules, "sentence_transformers", fake_module)
+
+    embedder = Embedder(model_name="fake/model")
+    await embedder.prefetch_model()
+    await embedder.prefetch_model()
+
+    assert load_calls == 1

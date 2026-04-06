@@ -203,6 +203,10 @@ class ScrapedPage(TimestampedModel):
     module: SpringModule = Field(
         description="Spring module this page belongs to",
     )
+    submodule: str | None = Field(
+        default=None,
+        description="Optional submodule key",
+    )
     version: SpringVersion = Field(
         description="Spring version this page documents",
     )
@@ -264,6 +268,7 @@ class ScrapedPage(TimestampedModel):
         url: str,
         module: SpringModule,
         version: SpringVersion,
+        submodule: str | None,
         title: str,
         raw_html: str,
         markdown_content: str,
@@ -289,6 +294,7 @@ class ScrapedPage(TimestampedModel):
             url=url,
             module=module,
             version=version,
+            submodule=submodule,
             title=title,
             raw_html=raw_html,
             markdown_content=markdown_content,

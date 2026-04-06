@@ -20,6 +20,8 @@ EverSpring MCP is a Hybrid RAG system providing LLMs with real-time, verified ac
 - **Type Safety:** Strict use of Pydantic models for all data structures
 - **Async First:** Use `asyncio` and `httpx` for all I/O bound operations
 - **Incremental Sync:** Minimize S3 egress costs by syncing only changed content
+- **Version Source of Truth:** Extract versions from documentation HTML (`span.version`) and fail scrapes when missing or invalid
+- **Multi-Module Support:** Treat Spring Data/Cloud as submodule families with per-submodule versioning and storage paths
 
 ## Embedding Strategy
 
@@ -40,6 +42,7 @@ EverSpring MCP is a Hybrid RAG system providing LLMs with real-time, verified ac
 - Focus on resilience and rate-limiting
 - Convert scraped content to clean Markdown
 - Handle network failures gracefully
+- Use the explicit submodule registry for multi-module families (no auto-discovery)
 
 ### MCP Tools
 - Write clear docstrings—they serve as tool definitions for the LLM
@@ -52,6 +55,7 @@ EverSpring MCP is a Hybrid RAG system providing LLMs with real-time, verified ac
 ### Sync Logic
 - Implement incremental sync using hash comparison
 - Pull only changed "Knowledge Packs" from S3
+- Preserve submodule-aware paths (`docs/{module}/{submodule}/{version}` when submodule exists)
 
 ### Pydantic Models
 - Define clear and concise models with appropriate validation
@@ -77,6 +81,7 @@ EverSpring MCP is a Hybrid RAG system providing LLMs with real-time, verified ac
 
 - Use `pytest` for all tests
 - Focus on edge cases: doc structure changes, network failures, hash mismatches
+- Include tests for version extraction, registry handling, and title sanitization
 
 ## Security
 
@@ -87,4 +92,7 @@ EverSpring MCP is a Hybrid RAG system providing LLMs with real-time, verified ac
 - Regularly review and update dependencies to mitigate security risks
 - Implement proper error handling to avoid exposing sensitive information in error messages
 - Consider implementing logging and monitoring for security-related events, especially for AWS interactions
+
+## Future Work Notes
+- Plan for a cron-based version check that reuses version extraction and registry targets
 

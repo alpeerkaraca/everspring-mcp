@@ -9,8 +9,8 @@ This module provides SpringDocParser for parsing Spring documentation:
 
 from __future__ import annotations
 
-import logging
 import re
+import time
 from typing import ClassVar
 
 from bs4 import BeautifulSoup, Tag
@@ -28,9 +28,11 @@ from everspring_mcp.models.content import (
 )
 from everspring_mcp.models.spring import SpringModule, SpringVersion
 from everspring_mcp.scraper.exceptions import ContentExtractionError
+from everspring_mcp.utils import sanitize_title
+from everspring_mcp.utils.logging import get_logger
 
 
-logger = logging.getLogger(__name__)
+logger = get_logger("scraper.parser")
 
 
 # Default CSS selectors for Spring documentation structure
@@ -66,6 +68,9 @@ SPRING_DOC_SELECTORS: dict[str, list[str]] = {
         ".highlight pre",
         "pre.programlisting",
         "pre.code",
+    ],
+    "version": [
+        "span.version",
     ],
 }
 
@@ -115,6 +120,10 @@ class ParserConfig(BaseModel):
     code_selectors: list[str] = Field(
         default_factory=lambda: SPRING_DOC_SELECTORS["code_blocks"].copy(),
         description="CSS selectors for code blocks",
+    )
+    version_selectors: list[str] = Field(
+        default_factory=lambda: SPRING_DOC_SELECTORS["version"].copy(),
+        description="CSS selectors for version extraction",
     )
     strip_tags: list[str] = Field(
         default_factory=lambda: ["script", "style", "noscript", "iframe"],
@@ -298,6 +307,25 @@ class SpringDocParser:
                 return element.get_text(strip=True)
         
         raise ContentExtractionError("Could not extract page title")
+
+    def extract_version(self, soup: BeautifulSoup, selectors: list[str] | None = None) -> str:
+        """Extract documentation version from HTML.
+
+        Args:
+            soup: BeautifulSoup object
+
+        Returns:
+            Version string (e.g., "4.0.5")
+
+        Raises:
+            ContentExtractionError: If version cannot be found
+        """
+        element = self._find_first(soup, selectors or self.config.version_selectors)
+        if element:
+            text = element.get_text(strip=True)
+            if text:
+                return text
+        raise ContentExtractionError("Could not extract version from page")
     
     def extract_sidebar(self, soup: BeautifulSoup) -> list[dict]:
         """Extract sidebar navigation hierarchy.
@@ -467,6 +495,9 @@ class SpringDocParser:
         # Use custom converter
         md = self._converter.convert(html)
         
+        # Clean up Spring docs copy-button artifacts
+        md = re.sub(r"Copied!(?=\s|$)", "", md)
+        
         # Clean up excessive whitespace
         md = re.sub(r"\n{3,}", "\n\n", md)
         md = re.sub(r" +", " ", md)
@@ -559,7 +590,8 @@ class SpringDocParser:
         html: str,
         url: str,
         module: SpringModule,
-        version: SpringVersion,
+        version: SpringVersion | None,
+        submodule: str | None = None,
         content_type: ContentType = ContentType.REFERENCE,
     ) -> ScrapedPage:
         """Parse HTML into ScrapedPage model.
@@ -589,6 +621,46 @@ class SpringDocParser:
         except ContentExtractionError:
             title = url.split("/")[-1].replace("-", " ").title()
             logger.warning(f"Using fallback title: {title}")
+
+        title = sanitize_title(title)
+
+        parsed_version: SpringVersion
+        if content_type == ContentType.API_DOC and version is not None:
+            try:
+                version_text = self.extract_version(soup)
+            except ContentExtractionError:
+                parsed_version = version
+                logger.debug(
+                    "Using provided release version %s for API doc page: %s",
+                    version.version_string,
+                    url,
+                )
+            else:
+                try:
+                    parsed_version = SpringVersion.parse(module, version_text)
+                except ValueError as exc:
+                    raise ContentExtractionError(str(exc), url=url) from exc
+                if parsed_version != version:
+                    raise ContentExtractionError(
+                        f"Version mismatch: expected {version.version_string}, got {parsed_version.version_string}",
+                        url=url,
+                    )
+        else:
+            if content_type == ContentType.API_DOC and version is None:
+                raise ContentExtractionError(
+                    "API documentation scraping requires an explicit release version",
+                    url=url,
+                )
+            version_text = self.extract_version(soup)
+            try:
+                parsed_version = SpringVersion.parse(module, version_text)
+            except ValueError as exc:
+                raise ContentExtractionError(str(exc), url=url) from exc
+            if version and parsed_version != version:
+                raise ContentExtractionError(
+                    f"Version mismatch: expected {version.version_string}, got {parsed_version.version_string}",
+                    url=url,
+                )
         
         # Extract main content
         try:
@@ -616,7 +688,8 @@ class SpringDocParser:
         return ScrapedPage.create(
             url=url,
             module=module,
-            version=version,
+            version=parsed_version,
+            submodule=submodule,
             title=title,
             raw_html=html,
             markdown_content=markdown_content,

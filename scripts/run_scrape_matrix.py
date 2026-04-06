@@ -1,0 +1,270 @@
+"""Run scrape jobs from config\\module_submodule_urls.csv with parallel workers.
+
+Defaults:
+- 5 parallel jobs
+- 5 scrape concurrency per job
+- reference lane -> /doc
+- api-doc lane -> docs/api
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import re
+import subprocess
+import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+
+
+@dataclass(frozen=True)
+class ScrapeJob:
+    module: str
+    submodule: str | None
+    version: str
+    content_type: str
+    entry_url: str
+    s3_prefix: str
+
+
+@dataclass(frozen=True)
+class JobResult:
+    job: ScrapeJob
+    exit_code: int
+    log_path: Path
+    command: list[str]
+
+
+def _safe_name(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", value).strip("_") or "job"
+
+
+def build_jobs(
+    csv_path: Path,
+    include_reference: bool,
+    include_api: bool,
+    reference_prefix: str,
+    api_prefix: str,
+) -> list[ScrapeJob]:
+    jobs: list[ScrapeJob] = []
+    with csv_path.open("r", encoding="utf-8", newline="") as fh:
+        reader = csv.DictReader(fh)
+        for row in reader:
+            module = (row.get("module") or "").strip()
+            submodule = (row.get("submodule") or "").strip() or None
+            version = (row.get("version") or "").strip()
+            reference_url = (row.get("reference_url") or "").strip()
+            api_url = (row.get("api_url") or "").strip()
+
+            if not module or not version:
+                continue
+
+            if include_reference and reference_url:
+                jobs.append(
+                    ScrapeJob(
+                        module=module,
+                        submodule=submodule,
+                        version=version,
+                        content_type="reference",
+                        entry_url=reference_url,
+                        s3_prefix=reference_prefix,
+                    )
+                )
+
+            if include_api and api_url:
+                jobs.append(
+                    ScrapeJob(
+                        module=module,
+                        submodule=submodule,
+                        version=version,
+                        content_type="api-doc",
+                        entry_url=api_url,
+                        s3_prefix=api_prefix,
+                    )
+                )
+
+    return jobs
+
+
+def build_command(
+    job: ScrapeJob,
+    repo_root: Path,
+    scrape_concurrency: int,
+    uv_bin: str,
+) -> list[str]:
+    cmd = [
+        uv_bin,
+        "run",
+        str(repo_root / "src" / "everspring_mcp" / "main.py"),
+        "scrape",
+        "--entry-url",
+        job.entry_url,
+        "--module",
+        job.module,
+        "--version",
+        job.version,
+        "--content-type",
+        job.content_type,
+        "--concurrency",
+        str(scrape_concurrency),
+        "--s3-prefix",
+        job.s3_prefix,
+    ]
+    if job.submodule:
+        cmd.extend(["--submodule", job.submodule])
+    return cmd
+
+
+def run_job(
+    job: ScrapeJob,
+    repo_root: Path,
+    log_dir: Path,
+    scrape_concurrency: int,
+    uv_bin: str,
+) -> JobResult:
+    sub = job.submodule or "root"
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_name = f"{_safe_name(job.module)}_{_safe_name(sub)}_{_safe_name(job.content_type)}_{stamp}.log"
+    log_path = log_dir / log_name
+    cmd = build_command(job, repo_root, scrape_concurrency, uv_bin)
+
+    exit_code = 1
+    try:
+        with log_path.open("w", encoding="utf-8") as log_fh:
+            log_fh.write(f"COMMAND: {' '.join(cmd)}\n\n")
+            completed = subprocess.run(
+                cmd,
+                cwd=repo_root,
+                stdout=log_fh,
+                stderr=subprocess.STDOUT,
+                text=True,
+                check=False,
+            )
+            exit_code = completed.returncode
+    except FileNotFoundError:
+        with log_path.open("a", encoding="utf-8") as log_fh:
+            log_fh.write(f"\nERROR: Executable not found: {uv_bin}\n")
+        exit_code = 127
+
+    return JobResult(job=job, exit_code=exit_code, log_path=log_path, command=cmd)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Run scrape matrix from CSV with parallel workers.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument(
+        "--csv",
+        default="config\\module_submodule_urls.csv",
+        help="Path to CSV file.",
+    )
+    parser.add_argument(
+        "--parallel-jobs",
+        type=int,
+        default=5,
+        help="Number of scrape jobs to run in parallel.",
+    )
+    parser.add_argument(
+        "--scrape-concurrency",
+        type=int,
+        default=5,
+        help="--concurrency passed to each scrape command.",
+    )
+    parser.add_argument(
+        "--include",
+        choices=["both", "reference", "api"],
+        default="both",
+        help="Which lanes to execute.",
+    )
+    parser.add_argument(
+        "--reference-prefix",
+        default="/docs",
+        help="S3 prefix for reference documentation lane.",
+    )
+    parser.add_argument(
+        "--api-prefix",
+        default="/docs/api",
+        help="S3 prefix for API documentation lane.",
+    )
+    parser.add_argument(
+        "--uv-bin",
+        default="uv",
+        help="uv executable name or path.",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print commands without executing.",
+    )
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    repo_root = Path(__file__).resolve().parents[1]
+    csv_path = (repo_root / args.csv).resolve()
+    log_dir = repo_root / "logs" / "scrape-matrix"
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    include_reference = args.include in ("both", "reference")
+    include_api = args.include in ("both", "api")
+
+    jobs = build_jobs(
+        csv_path=csv_path,
+        include_reference=include_reference,
+        include_api=include_api,
+        reference_prefix=args.reference_prefix,
+        api_prefix=args.api_prefix,
+    )
+
+    if not jobs:
+        print(f"No jobs found in {csv_path}")
+        return 0
+
+    print(f"Loaded {len(jobs)} jobs from {csv_path}")
+    print(
+        f"Running with {args.parallel_jobs} parallel jobs and "
+        f"{args.scrape_concurrency} scrape concurrency per job."
+    )
+
+    if args.dry_run:
+        for job in jobs:
+            cmd = build_command(job, repo_root, args.scrape_concurrency, args.uv_bin)
+            print(" ".join(cmd))
+        return 0
+
+    failures: list[JobResult] = []
+    successes = 0
+    with ThreadPoolExecutor(max_workers=args.parallel_jobs) as executor:
+        futures = {
+            executor.submit(
+                run_job,
+                job,
+                repo_root,
+                log_dir,
+                args.scrape_concurrency,
+                args.uv_bin,
+            ): job
+            for job in jobs
+        }
+
+        for future in as_completed(futures):
+            result = future.result()
+            lane = f"{result.job.module}/{result.job.submodule or 'root'} [{result.job.content_type}]"
+            if result.exit_code == 0:
+                successes += 1
+                print(f"[OK]   {lane} -> {result.log_path}")
+            else:
+                failures.append(result)
+                print(f"[FAIL] {lane} (exit {result.exit_code}) -> {result.log_path}")
+
+    print(f"\nCompleted: {successes} succeeded, {len(failures)} failed.")
+    return 1 if failures else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

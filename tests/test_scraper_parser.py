@@ -29,6 +29,7 @@ from everspring_mcp.scraper.parser import (
     SpringDocParser,
     SPRING_DOC_SELECTORS,
 )
+from everspring_mcp.scraper.exceptions import ContentExtractionError
 
 
 # =============================================================================
@@ -229,7 +230,7 @@ class TestSpringDocParser:
         soup = BeautifulSoup(sample_spring_html, "lxml")
         title = parser.extract_title(soup)
         
-        assert title == "Spring Boot Reference Documentation"
+        assert title == "Spring Boot Reference Documentation - Exämple"
 
     def test_extract_title_from_og_meta(self, parser: SpringDocParser) -> None:
         """Test title extraction from og:title meta tag."""
@@ -335,9 +336,27 @@ class TestSpringDocParser:
         """Test HTML to Markdown conversion."""
         markdown = parser.to_markdown(sample_spring_html)
         
-        assert "# Spring Boot Reference Documentation" in markdown
+        assert "# Spring Boot Reference Documentation - Exämple" in markdown
         assert "## Getting Started" in markdown
         assert "@SpringBootApplication" in markdown
+
+    def test_to_markdown_removes_copied_artifacts(
+        self,
+        parser: SpringDocParser,
+    ) -> None:
+        """Spring docs copy-button artifacts should be removed from markdown."""
+        html = """
+        <article>
+            <h1>Sample</h1>
+            <pre><code class="language-java">class Demo {}</code></pre>
+            <p>Copied!</p>
+        </article>
+        """
+
+        markdown = parser.to_markdown(html)
+
+        assert "class Demo" in markdown
+        assert "Copied!" not in markdown
 
     def test_parse_full_page(
         self,
@@ -351,12 +370,14 @@ class TestSpringDocParser:
             url="https://docs.spring.io/spring-boot/reference/",
             module=SpringModule.BOOT,
             version=spring_boot_version,
+            submodule="redis",
             content_type=ContentType.REFERENCE,
         )
         
         assert isinstance(scraped_page, ScrapedPage)
-        assert scraped_page.title == "Spring Boot Reference Documentation"
+        assert scraped_page.title == "Spring Boot Reference Documentation - Ex-mple"
         assert scraped_page.module == SpringModule.BOOT
+        assert scraped_page.submodule == "redis"
         assert scraped_page.version == spring_boot_version
         assert scraped_page.content_type == ContentType.REFERENCE
         assert scraped_page.schema_version == VersionedModel.CURRENT_SCHEMA_VERSION
@@ -422,6 +443,86 @@ class TestSpringDocParser:
         
         assert scraped_page.title == "Minimal Content"
         assert "minimal content" in scraped_page.markdown_content.lower()
+
+    def test_extract_version(self, parser: SpringDocParser, sample_spring_html: str) -> None:
+        """Test version extraction from HTML."""
+        from bs4 import BeautifulSoup
+
+        soup = BeautifulSoup(sample_spring_html, "lxml")
+        version = parser.extract_version(soup)
+
+        assert version == "4.0.5"
+
+    def test_missing_version_raises(self, parser: SpringDocParser) -> None:
+        """Test version extraction raises when missing."""
+        from bs4 import BeautifulSoup
+
+        html = "<html><body><h1>No version</h1></body></html>"
+        soup = BeautifulSoup(html, "lxml")
+
+        with pytest.raises(ContentExtractionError):
+            parser.extract_version(soup)
+
+    def test_version_mismatch_raises(
+        self,
+        parser: SpringDocParser,
+        sample_spring_html: str,
+        spring_framework_version: SpringVersion,
+    ) -> None:
+        """Test parse fails when version doesn't match expected."""
+        with pytest.raises(ContentExtractionError):
+            parser.parse(
+                html=sample_spring_html,
+                url="https://docs.spring.io/spring-boot/reference/",
+                module=SpringModule.BOOT,
+                version=spring_framework_version,
+            )
+
+    def test_api_doc_uses_provided_version_when_page_lacks_version(
+        self,
+        parser: SpringDocParser,
+        spring_boot_version: SpringVersion,
+    ) -> None:
+        """API docs should use provided release version when marker is missing."""
+        html = """
+        <html>
+          <head><title>API Page</title></head>
+          <body>
+            <main>
+              <h1>Package Summary</h1>
+              <p>API docs usually don't render release version marker.</p>
+            </main>
+          </body>
+        </html>
+        """
+        page = parser.parse(
+            html=html,
+            url="https://docs.spring.io/spring-boot/api/java/org/example/package-summary.html",
+            module=SpringModule.BOOT,
+            version=spring_boot_version,
+            content_type=ContentType.API_DOC,
+        )
+        assert page.version == spring_boot_version
+
+    def test_api_doc_requires_explicit_version_when_missing_marker(
+        self,
+        parser: SpringDocParser,
+    ) -> None:
+        """API docs without marker must fail if explicit version is not provided."""
+        html = """
+        <html>
+          <head><title>API Page</title></head>
+          <body><main><h1>Package Summary</h1></main></body>
+        </html>
+        """
+        with pytest.raises(ContentExtractionError, match="requires an explicit release version"):
+            parser.parse(
+                html=html,
+                url="https://docs.spring.io/spring-boot/api/java/org/example/package-summary.html",
+                module=SpringModule.BOOT,
+                version=None,
+                content_type=ContentType.API_DOC,
+            )
 
 
 # =============================================================================

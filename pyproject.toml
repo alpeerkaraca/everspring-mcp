@@ -36,6 +36,7 @@ dependencies = [
     "tiktoken>=0.7.0",
     "sentence-transformers>=2.7.0",
     "aiosqlite>=0.19.0",
+    "rank-bm25>=0.2.2",
 ]
 
 [project.optional-dependencies]
@@ -48,6 +49,10 @@ dev = [
     "boto3-stubs[s3]>=1.28.0",
     "moto[s3]>=4.2.0",
 ]
+
+[project.scripts]
+everspring-mcp = "everspring_mcp.mcp.server:run_server"
+everspring-client = "everspring_mcp.mcp.client:run_interactive"
 
 [project.urls]
 Homepage = "https://github.com/alpeerkaraca/everspring-mcp"
@@ -84,3 +89,8 @@ plugins = ["pydantic.mypy"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 addopts = "-v --cov=src/everspring_mcp --cov-report=term-missing"
+
+[dependency-groups]
+dev = [
+    "moto>=5.1.22",
+]

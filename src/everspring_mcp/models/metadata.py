@@ -49,6 +49,10 @@ class DocumentMetadata(TimestampedModel):
     module: SpringModule = Field(
         description="Spring module",
     )
+    submodule: str | None = Field(
+        default=None,
+        description="Optional submodule key",
+    )
     version: SpringVersion = Field(
         description="Spring version",
     )
@@ -230,6 +234,10 @@ class SearchableDocument(VersionedModel):
     module: SpringModule = Field(
         description="Spring module for filtering",
     )
+    submodule: str | None = Field(
+        default=None,
+        description="Optional submodule for filtering",
+    )
     version_major: int = Field(
         ge=1,
         description="Major version for filtering",
@@ -304,6 +312,7 @@ class SearchableDocument(VersionedModel):
             content=chunk_content,
             content_hash=compute_hash(chunk_content),
             module=doc.metadata.module,
+            submodule=doc.metadata.submodule,
             version_major=doc.metadata.version.major,
             version_minor=doc.metadata.version.minor,
             content_type=doc.metadata.content_type,
@@ -324,6 +333,7 @@ class SearchableDocument(VersionedModel):
             "document_id": self.document_id,
             "chunk_index": self.chunk_index,
             "module": self.module.value,
+            "submodule": self.submodule or "",
             "version_major": self.version_major,
             "version_minor": self.version_minor,
             "content_type": self.content_type.value,
@@ -336,9 +346,63 @@ class SearchableDocument(VersionedModel):
         }
 
 
+class SearchResult(VersionedModel):
+    """Result from hybrid retrieval search.
+    
+    Combines content with metadata and ranking scores.
+    """
+    
+    id: str = Field(
+        description="Chunk identifier (doc_id-chunk_index)",
+    )
+    content: str = Field(
+        description="Retrieved text content (markdown chunk)",
+    )
+    title: str = Field(
+        description="Document title",
+    )
+    url: str = Field(
+        description="Source documentation URL",
+    )
+    module: str = Field(
+        description="Spring module name",
+    )
+    submodule: str | None = Field(
+        default=None,
+        description="Spring submodule (e.g., redis for spring-data)",
+    )
+    version_major: int = Field(
+        description="Major version number",
+    )
+    version_minor: int = Field(
+        description="Minor version number",
+    )
+    score: float = Field(
+        ge=0.0,
+        description="Combined retrieval score (higher = better)",
+    )
+    dense_rank: int | None = Field(
+        default=None,
+        description="Rank from dense (cosine) retrieval",
+    )
+    sparse_rank: int | None = Field(
+        default=None,
+        description="Rank from sparse (BM25) retrieval",
+    )
+    section_path: str = Field(
+        default="",
+        description="Section hierarchy path",
+    )
+    has_code: bool = Field(
+        default=False,
+        description="Whether chunk contains code examples",
+    )
+
+
 __all__ = [
     "DocumentMetadata",
     "DeprecatedAPI",
     "DocumentIndex",
     "SearchableDocument",
+    "SearchResult",
 ]

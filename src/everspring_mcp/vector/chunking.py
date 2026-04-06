@@ -1,20 +1,29 @@
 """EverSpring MCP - Markdown chunking utilities.
 
 Hybrid chunking strategy:
-1) Split by headings
-2) Enforce max token size with overlap
+1) Clean known markdown artifacts
+2) Split by headings
+3) Enforce max token size with overlap and natural breakpoints
 """
 
 from __future__ import annotations
 
 import re
+import hashlib
 from dataclasses import dataclass
-from typing import Iterable
 
 import tiktoken
 
 
 HEADING_PATTERN = re.compile(r"^(#{1,6})\s+(.+)$")
+
+# Patterns to clean from Spring docs
+CLEANUP_PATTERNS = [
+    re.compile(r"Copied!$", re.MULTILINE),  # Copy button artifact
+    re.compile(r"Copied!\s*```", re.MULTILINE),  # Copied! before closing fence
+    re.compile(r"```\s*Copied!", re.MULTILINE),  # Copied! after code block
+    re.compile(r"Copied!(?=\s|$)"),  # Inline copy button artifact
+]
 
 
 @dataclass(frozen=True)
@@ -42,6 +51,15 @@ class MarkdownChunker:
     
     def _count_tokens(self, text: str) -> int:
         return len(self._encoder.encode(text))
+    
+    def _clean_content(self, text: str) -> str:
+        """Remove Spring docs artifacts from content."""
+        result = text
+        for pattern in CLEANUP_PATTERNS:
+            result = pattern.sub("", result)
+        # Clean up extra whitespace
+        result = re.sub(r"\n{3,}", "\n\n", result)
+        return result.strip()
     
     def _split_by_headings(self, markdown: str) -> list[tuple[str, str]]:
         """Split markdown into sections by headings.
@@ -77,48 +95,83 @@ class MarkdownChunker:
         return [(path, "\n".join(content)) for path, content in sections]
     
     def _split_by_tokens(self, text: str) -> list[str]:
-        """Split text into token-limited chunks with overlap."""
+        """Split text into token-limited chunks with natural boundaries."""
         tokens = self._encoder.encode(text)
         if len(tokens) <= self.max_tokens:
             return [text]
-        
+
         chunks: list[str] = []
         start = 0
         while start < len(tokens):
             end = min(start + self.max_tokens, len(tokens))
-            chunk_tokens = tokens[start:end]
-            chunk_text = self._encoder.decode(chunk_tokens)
+            chunk_text = self._encoder.decode(tokens[start:end]).strip()
+
+            if end < len(tokens):
+                chunk_text = self._find_natural_break(chunk_text)
+            if not chunk_text:
+                chunk_text = self._encoder.decode(tokens[start:end]).strip()
+            if not chunk_text:
+                break
+
             chunks.append(chunk_text)
             if end == len(tokens):
                 break
-            start = max(0, end - self.overlap_tokens)
-        
+
+            used_tokens = len(self._encoder.encode(chunk_text))
+            step = max(1, used_tokens - self.overlap_tokens)
+            start += step
+
         return chunks
+
+    def _find_natural_break(self, text: str) -> str:
+        """Find a natural break point (paragraph, sentence, or code fence)."""
+        if not text:
+            return text
+
+        # Avoid returning incomplete fenced code at chunk tail.
+        if text.count("```") % 2 == 1:
+            last_fence = text.rfind("```")
+            if last_fence > len(text) * 0.4:
+                trimmed = text[:last_fence].strip()
+                if trimmed:
+                    return trimmed
+
+        search_start = len(text) // 2
+        for marker in ("\n\n", "\n- ", "\n* ", ". ", "! ", "? ", "; "):
+            pos = text.rfind(marker, search_start)
+            if pos != -1:
+                return text[: pos + len(marker)].strip()
+
+        return text.strip()
     
     def chunk(self, markdown: str) -> list[MarkdownChunk]:
         """Chunk markdown using hybrid strategy.
         
         Returns list of MarkdownChunk objects.
         """
-        heading_sections = self._split_by_headings(markdown)
+        # Clean content first
+        cleaned = self._clean_content(markdown)
+        heading_sections = self._split_by_headings(cleaned)
         chunks: list[MarkdownChunk] = []
         
         for section_path, content in heading_sections:
             for piece in self._split_by_tokens(content):
-                has_code = "```" in piece or "`" in piece
-                content_hash = self._hash_content(piece)
+                stripped = piece.strip()
+                if not stripped:
+                    continue
+                has_code = "```" in stripped or "`" in stripped
+                content_hash = self._hash_content(stripped)
                 chunks.append(MarkdownChunk(
-                    content=piece.strip(),
+                    content=stripped,
                     section_path=section_path,
                     has_code=has_code,
                     content_hash=content_hash,
                 ))
         
-        return [c for c in chunks if c.content]
+        return chunks
 
     @staticmethod
     def _hash_content(text: str) -> str:
-        import hashlib
         return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 

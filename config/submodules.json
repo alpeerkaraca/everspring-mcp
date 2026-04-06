@@ -1,0 +1,38 @@
+{
+  "targets": [
+    {
+      "module_key": "spring-boot",
+      "base_url": "https://docs.spring.io/spring-boot/reference/",
+      "version_selector": "span.version"
+    },
+    {
+      "module_key": "spring-framework",
+      "base_url": "https://docs.spring.io/spring-framework/reference/",
+      "version_selector": "span.version"
+    },
+    {
+      "module_key": "spring-data",
+      "submodule_key": "commons",
+      "base_url": "https://docs.spring.io/spring-data/commons/reference/",
+      "version_selector": "span.version"
+    },
+    {
+      "module_key": "spring-data",
+      "submodule_key": "redis",
+      "base_url": "https://docs.spring.io/spring-data/redis/reference/",
+      "version_selector": "span.version"
+    },
+    {
+      "module_key": "spring-data",
+      "submodule_key": "mongodb",
+      "base_url": "https://docs.spring.io/spring-data/mongodb/reference/",
+      "version_selector": "span.version"
+    },
+    {
+      "module_key": "spring-cloud",
+      "submodule_key": "commons",
+      "base_url": "https://docs.spring.io/spring-cloud-commons/reference/",
+      "version_selector": "span.version"
+    }
+  ]
+}

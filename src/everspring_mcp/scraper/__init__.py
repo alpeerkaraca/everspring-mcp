@@ -10,10 +10,12 @@ This package provides tools for scraping Spring documentation:
 
 from .browser import BrowserConfig, SpringBrowser, USER_AGENTS
 from .discovery import (
+    BASE_SKIP_PATTERNS,
     DiscoveredLink,
     DiscoveryConfig,
     DiscoveryResult,
     DiscoveryStatus,
+    REFERENCE_ONLY_SKIP_PATTERNS,
     SpringDocDiscovery,
     extract_base_path,
     flatten_nav_items,
@@ -21,7 +23,6 @@ from .discovery import (
     normalize_url,
     should_skip_url,
     SKIP_EXTENSIONS,
-    SKIP_PATTERNS,
 )
 from .exceptions import (
     BrowserLaunchError,
@@ -38,6 +39,7 @@ from .parser import (
     SpringDocParser,
     SpringMarkdownConverter,
 )
+from .registry import SubmoduleRegistry, SubmoduleTarget
 from .pipeline import (
     PipelineConfig,
     PipelineStatus,
@@ -59,6 +61,8 @@ __all__ = [
     "SpringMarkdownConverter",
     "SPRING_DOC_SELECTORS",
     "LANGUAGE_PATTERNS",
+    "SubmoduleRegistry",
+    "SubmoduleTarget",
     # Discovery
     "SpringDocDiscovery",
     "DiscoveryConfig",
@@ -71,7 +75,8 @@ __all__ = [
     "should_skip_url",
     "flatten_nav_items",
     "SKIP_EXTENSIONS",
-    "SKIP_PATTERNS",
+    "BASE_SKIP_PATTERNS",
+    "REFERENCE_ONLY_SKIP_PATTERNS",
     # Pipeline
     "ScraperPipeline",
     "PipelineConfig",

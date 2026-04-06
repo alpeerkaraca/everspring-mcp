@@ -8,6 +8,8 @@ EverSpring MCP is a specialized RAG (Retrieval-Augmented Generation) system desi
 - **Data Integrity:** Content must be validated via SHA-256 hashing before ingestion.
 - **Type Safety:** Strict use of Pydantic models for all data structures (No raw dicts).
 - **Asynchronous First:** Use `asyncio` and `httpx` for I/O bound operations (Scraping/API).
+- **Version Source of Truth:** Extract versions from documentation HTML (e.g., `span.version`) and fail scrapes when missing or invalid.
+- **Multi-Module Support:** Treat Spring Data/Cloud as submodule families with per-submodule versioning and storage paths.
 
 ## Tech Stack Requirements
 - **Language:** Python 3.11+
@@ -30,14 +32,17 @@ EverSpring MCP is a specialized RAG (Retrieval-Augmented Generation) system desi
 ## Role Definitions for Copilot
 - While performing every operation pay attention to security best practices, especially when handling data and interacting with AWS services.
 - When writing **Scrapers**: Focus on resilience, rate-limiting, and clean Markdown conversion.
+- When writing **Scrapers**: Use the explicit submodule registry for multi-module families (no auto-discovery).
 - When writing **MCP Tools**: Ensure clear docstrings as they are used by the LLM as tool definitions.
 - When writing **Sync Logic**: Prioritize "Incremental Sync" to minimize S3 egress costs.
 - When writing **Vectorization Logic**: Ensure that the embedding process is consistent and that metadata is correctly associated with each vector.
 - When writing **Tests**: Use `pytest` and focus on edge cases (e.g., handling doc structure changes, network failures).
+- When writing **Tests**: Include version extraction, registry handling, and title sanitization coverage.
 - When writing **LLM Prompts**: Ensure clarity and specificity to guide the LLM effectively, and include examples where possible.
 - When writing **Pydantic Models**: Define clear and concise models with appropriate validation to ensure data integrity throughout the system.
 - When writing **AWS Lambda Functions**: Focus on efficient resource usage, proper error handling, and secure access to AWS services (e.g., using IAM roles).
 - When writing **S3 Interaction Logic**: Ensure that all interactions with S3 are secure, efficient, and include proper error handling to manage potential issues with network or permissions.
+- When writing **S3 Interaction Logic**: Preserve submodule-aware paths (`docs/{module}/{submodule}/{version}` when submodule exists).
 - When writing **ChromaDB Logic**: Ensure that vector storage and retrieval are optimized for performance, and that metadata is correctly associated with each vector for effective filtering.
 - When writing **Terraform Scripts**: Follow best practices for infrastructure as code, including modularization, use of variables, and proper state management to ensure reproducibility and maintainability.
 
@@ -47,3 +52,6 @@ EverSpring MCP is a specialized RAG (Retrieval-Augmented Generation) system desi
 - Organize the repository with clear directories for different components (e.g., `scrapers/`, `mcp_tools/`, `sync/`, `vectorization/`, `tests/`, `prompts/`, `models/`, `aws/`, `chroma/`, `terraform/`).
 - Use branches effectively to manage different features or bug fixes, and ensure that pull requests
 - Use Pull Requests before merging to the main branch, and include a clear description of the changes and any relevant context for reviewers. Ensure that all tests pass before merging.
+
+## Future Work Notes
+- Plan for a cron-based version check that reuses version extraction and registry targets.

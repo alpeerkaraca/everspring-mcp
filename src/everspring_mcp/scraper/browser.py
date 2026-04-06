@@ -11,8 +11,8 @@ for scraping Spring documentation with:
 from __future__ import annotations
 
 import asyncio
-import logging
 import random
+import time
 from typing import Self
 
 from playwright.async_api import (
@@ -34,8 +34,9 @@ from everspring_mcp.scraper.exceptions import (
     NavigationTimeoutError,
     RateLimitError,
 )
+from everspring_mcp.utils.logging import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger("scraper.browser")
 
 # User agents for rotation - modern browsers on various platforms
 USER_AGENTS: list[str] = [
@@ -156,12 +157,13 @@ class SpringBrowser:
     async def _launch(self) -> None:
         """Launch browser and create initial context."""
         try:
+            start = time.perf_counter()
             self._playwright = await async_playwright().start()
             self._browser = await self._playwright.chromium.launch(
                 headless=self.config.headless,
             )
             await self._create_context()
-            logger.info("Browser launched successfully")
+            logger.info(f"Browser launched in {time.perf_counter() - start:.2f}s")
         except PlaywrightError as e:
             raise BrowserLaunchError(f"Failed to launch browser: {e}") from e
     

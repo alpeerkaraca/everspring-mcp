@@ -112,7 +112,13 @@ class SyncConfig(BaseModel):
         
         return self.docs_dir / relative_key
     
-    def get_s3_key(self, module: str, version: str, relative_path: str) -> str:
+    def get_s3_key(
+        self,
+        module: str,
+        version: str,
+        relative_path: str,
+        submodule: str | None = None,
+    ) -> str:
         """Build S3 key for a document or metadata file.
         
         Args:
@@ -124,9 +130,11 @@ class SyncConfig(BaseModel):
             Full S3 key
         """
         clean_path = relative_path.lstrip("/")
+        if submodule:
+            return f"{self.s3_prefix}/{module}/{submodule}/{version}/{clean_path}"
         return f"{self.s3_prefix}/{module}/{version}/{clean_path}"
     
-    def get_manifest_key(self, module: str, version: str) -> str:
+    def get_manifest_key(self, module: str, version: str, submodule: str | None = None) -> str:
         """Get S3 key for manifest file.
         
         Args:
@@ -136,6 +144,8 @@ class SyncConfig(BaseModel):
         Returns:
             Manifest S3 key
         """
+        if submodule:
+            return f"{self.s3_prefix}/{module}/{submodule}/{version}/manifest.json"
         return f"{self.s3_prefix}/{module}/{version}/manifest.json"
     
     @classmethod

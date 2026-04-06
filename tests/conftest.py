@@ -34,10 +34,11 @@ SAMPLE_SPRING_HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta property="og:title" content="Spring Boot Reference Documentation">
-    <title>Spring Boot Reference Documentation</title>
+    <meta property="og:title" content="Spring Boot Reference Documentation - Exämple">
+    <title>Spring Boot Reference Documentation - Exämple</title>
 </head>
 <body>
+    <span class="version">4.0.5</span>
     <nav class="toc">
         <ul>
             <li>
@@ -61,7 +62,7 @@ SAMPLE_SPRING_HTML = """<!DOCTYPE html>
     </nav>
     
     <article class="doc">
-        <h1>Spring Boot Reference Documentation</h1>
+        <h1>Spring Boot Reference Documentation - Exämple</h1>
         
         <p>Welcome to the Spring Boot 4.0 reference documentation. This guide 
         provides comprehensive information about using Spring Boot.</p>
@@ -140,6 +141,7 @@ MINIMAL_SPRING_HTML = """<!DOCTYPE html>
 <html>
 <head><title>Minimal Page</title></head>
 <body>
+    <span class="version">4.0.5</span>
     <main>
         <h1>Minimal Content</h1>
         <p>This is minimal content for testing.</p>
@@ -153,6 +155,7 @@ EMPTY_SIDEBAR_HTML = """<!DOCTYPE html>
 <html>
 <head><title>No Sidebar</title></head>
 <body>
+    <span class="version">4.0.5</span>
     <article class="doc">
         <h1>Page Without Sidebar</h1>
         <p>This page has no navigation sidebar.</p>
@@ -204,12 +207,12 @@ def spring_framework_module() -> SpringModule:
 
 @pytest.fixture
 def spring_boot_version() -> SpringVersion:
-    """Valid Spring Boot 4.0.0 version."""
+    """Valid Spring Boot 4.0.5 version."""
     return SpringVersion(
         module=SpringModule.BOOT,
         major=4,
         minor=0,
-        patch=0,
+        patch=5,
     )
 
 

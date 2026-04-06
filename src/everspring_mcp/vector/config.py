@@ -54,7 +54,7 @@ class VectorConfig(BaseModel):
         description="ChromaDB collection name",
     )
     embedding_model: str = Field(
-        default="google/embedding-gemma-300m",
+        default="google/embeddinggemma-300m",
         min_length=1,
         description="Embedding model ID",
     )

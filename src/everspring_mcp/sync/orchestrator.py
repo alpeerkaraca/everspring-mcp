@@ -11,7 +11,7 @@ This module coordinates the full S3 → Local → SQLite sync flow:
 from __future__ import annotations
 
 import json
-import logging
+import time
 from collections.abc import Awaitable
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,13 +25,14 @@ from ..storage.repository import (
     LocalManifestRecord,
     StorageManager,
 )
+from ..utils.logging import get_logger
 from .config import SyncConfig
 from .s3_sync import DownloadResult, S3SyncService, SyncResult
 
 if TYPE_CHECKING:
     pass
 
-logger = logging.getLogger(__name__)
+logger = get_logger("sync.orchestrator")
 
 
 # Progress callback type
@@ -69,11 +70,13 @@ class SyncOrchestrator:
             s3_service: S3 sync service (creates one if not provided)
             progress_callback: Optional callback for progress updates
         """
+        start = time.perf_counter()
         self.config = config or SyncConfig.from_env()
         self._storage = storage
         self._s3_service = s3_service
         self._owns_storage = storage is None
         self._progress_callback = progress_callback
+        logger.info(f"SyncOrchestrator initialized in {time.perf_counter() - start:.3f}s")
     
     async def __aenter__(self) -> SyncOrchestrator:
         """Async context manager entry."""
@@ -123,6 +126,7 @@ class SyncOrchestrator:
         self,
         module: str,
         version: str,
+        submodule: str | None = None,
         force: bool = False,
     ) -> SyncResult:
         """Sync a Spring module version from S3.
@@ -145,24 +149,25 @@ class SyncOrchestrator:
         sync_id = await self.storage.sync_history.start_sync(
             module=module,
             version=version,
+            submodule=submodule,
         )
         
         try:
             await self._report_progress(f"Fetching manifest for {module}/{version}")
             
             # Step 1: Fetch remote manifest
-            remote_manifest = await self.s3.fetch_manifest(module, version)
+            remote_manifest = await self.s3.fetch_manifest(module, version, submodule=submodule)
             
             if remote_manifest is None:
                 # No manifest - try to build from S3 listing
                 logger.info("No manifest found, building from S3 listing")
                 await self._report_progress("Building manifest from S3")
-                remote_manifest = await self.s3.build_manifest_from_s3(module, version)
+                remote_manifest = await self.s3.build_manifest_from_s3(module, version, submodule=submodule)
             
             remote_hash = self.s3.compute_manifest_hash(remote_manifest)
             
             # Step 2: Get local manifest
-            local_record = await self.storage.manifests.get(module, version)
+            local_record = await self.storage.manifests.get(module, version, submodule=submodule)
             local_manifest = local_record.get_manifest() if local_record else None
             
             # Check if manifest changed
@@ -202,14 +207,14 @@ class SyncOrchestrator:
                 delta.added_count + delta.modified_count,
             )
             
-            download_results = await self.s3.download_changes(delta, module, version)
+            download_results = await self.s3.download_changes(delta, module, version, submodule=submodule)
             
             # Separate metadata and markdown downloads
             metadata_cache: dict[str, dict] = {}
             markdown_downloads: list[DownloadResult] = []
             
             for download in download_results:
-                relative_path = self._relative_path(download.s3_key, module, version)
+                relative_path = self._relative_path(download.s3_key, module, version, submodule)
                 if self._is_metadata_path(relative_path):
                     if download.success:
                         metadata = self._load_metadata(download.local_path)
@@ -229,10 +234,10 @@ class SyncOrchestrator:
                 )
                 
                 if download.success:
-                    url_hash = Path(self._relative_path(download.s3_key, module, version)).stem
+                    url_hash = Path(self._relative_path(download.s3_key, module, version, submodule)).stem
                     metadata = metadata_cache.get(url_hash)
                     await self._process_downloaded_file(
-                        download, module, version, metadata,
+                        download, module, version, metadata, submodule=submodule,
                     )
                     result.bytes_downloaded += download.size_bytes
                 else:
@@ -241,11 +246,11 @@ class SyncOrchestrator:
             # Count results (only markdown files)
             result.files_added = sum(
                 1 for d in markdown_downloads
-                if d.success and self._is_added(d.s3_key, delta, module, version)
+                if d.success and self._is_added(d.s3_key, delta, module, version, submodule=submodule)
             )
             result.files_modified = sum(
                 1 for d in markdown_downloads
-                if d.success and self._is_modified(d.s3_key, delta, module, version)
+                if d.success and self._is_modified(d.s3_key, delta, module, version, submodule=submodule)
             )
             
             # Step 5: Handle removals
@@ -255,7 +260,7 @@ class SyncOrchestrator:
             ]
 
             for change in removed_changes:
-                s3_key = self.config.get_s3_key(module, version, change.path)
+                s3_key = self.config.get_s3_key(module, version, change.path, submodule=submodule)
                 deleted = await self.s3.delete_local_file(s3_key)
                 
                 if deleted and not self._is_metadata_path(change.path):
@@ -268,6 +273,7 @@ class SyncOrchestrator:
                 version=version,
                 manifest=remote_manifest,
                 manifest_hash=remote_hash,
+                submodule=submodule,
             )
             
             # Finalize
@@ -305,6 +311,7 @@ class SyncOrchestrator:
         module: str,
         version: str,
         metadata: dict | None,
+        submodule: str | None = None,
     ) -> None:
         """Process a successfully downloaded file.
         
@@ -321,17 +328,19 @@ class SyncOrchestrator:
         patch = int(parts[2]) if len(parts) > 2 else 0
         
         # Extract relative path within module/version
-        relative_path = self._relative_path(download.s3_key, module, version)
+        relative_path = self._relative_path(download.s3_key, module, version, submodule)
         url_hash = Path(relative_path).stem
         
         # Read file to extract title (first heading)
         title = await self._extract_title(download.local_path)
         source_url = None
+        submodule = None
         scraped_at = datetime.now(timezone.utc)
         
         if metadata:
             source_url = metadata.get("url")
             title = metadata.get("title") or title
+            submodule = metadata.get("submodule") or submodule
             if metadata.get("scraped_at"):
                 scraped_at = self._parse_iso_datetime(metadata["scraped_at"])
         
@@ -344,6 +353,7 @@ class SyncOrchestrator:
             url=source_url or f"s3://{self.config.s3_bucket}/{download.s3_key}",
             title=title,
             module=module,
+            submodule=submodule,
             major_version=major,
             minor_version=minor,
             patch_version=patch,
@@ -403,25 +413,48 @@ class SyncOrchestrator:
         
         return mapping.get(module, SpringModule.BOOT)
     
-    def _is_added(self, s3_key: str, delta: SyncDelta, module: str, version: str) -> bool:
+    def _is_added(
+        self,
+        s3_key: str,
+        delta: SyncDelta,
+        module: str,
+        version: str,
+        submodule: str | None = None,
+    ) -> bool:
         """Check if S3 key was an addition."""
-        filename = self._relative_path(s3_key, module, version)
+        filename = self._relative_path(s3_key, module, version, submodule)
         return any(
             c.path == filename and c.change_type == ChangeType.ADDED
             for c in delta.changes
         )
     
-    def _is_modified(self, s3_key: str, delta: SyncDelta, module: str, version: str) -> bool:
+    def _is_modified(
+        self,
+        s3_key: str,
+        delta: SyncDelta,
+        module: str,
+        version: str,
+        submodule: str | None = None,
+    ) -> bool:
         """Check if S3 key was a modification."""
-        filename = self._relative_path(s3_key, module, version)
+        filename = self._relative_path(s3_key, module, version, submodule)
         return any(
             c.path == filename and c.change_type == ChangeType.MODIFIED
             for c in delta.changes
         )
 
-    def _relative_path(self, s3_key: str, module: str, version: str) -> str:
+    def _relative_path(
+        self,
+        s3_key: str,
+        module: str,
+        version: str,
+        submodule: str | None = None,
+    ) -> str:
         """Get relative path within module/version."""
-        prefix = f"{self.config.s3_prefix}/{module}/{version}/"
+        if submodule:
+            prefix = f"{self.config.s3_prefix}/{module}/{submodule}/{version}/"
+        else:
+            prefix = f"{self.config.s3_prefix}/{module}/{version}/"
         if s3_key.startswith(prefix):
             return s3_key[len(prefix):]
         return s3_key.split("/")[-1]
@@ -447,7 +480,12 @@ class SyncOrchestrator:
             value = value[:-1] + "+00:00"
         return datetime.fromisoformat(value)
     
-    async def get_sync_status(self, module: SpringModule, version: SpringVersion | str) -> dict:
+    async def get_sync_status(
+        self,
+        module: SpringModule | str,
+        version: SpringVersion | str,
+        submodule: str | None = None,
+    ) -> dict:
         """Get current sync status for a module/version.
         
         Args:
@@ -461,16 +499,18 @@ class SyncOrchestrator:
         docs = await self.storage.documents.get_by_module_version(
             module=module,
             major=int(version.major) if isinstance(version, SpringVersion) else int(version.split(".")[0]),
+            submodule=submodule,
         )
         
         # Get last sync
-        last_sync = await self.storage.sync_history.get_latest(module, version)
+        last_sync = await self.storage.sync_history.get_latest(module, version, submodule=submodule)
         
         # Get unindexed count
         unindexed = [d for d in docs if not d.is_indexed]
         
         return {
             "module": module,
+            "submodule": submodule,
             "version": version,
             "document_count": len(docs),
             "indexed_count": len(docs) - len(unindexed),
@@ -484,6 +524,25 @@ class SyncOrchestrator:
                 "files_removed": last_sync.files_removed if last_sync else 0,
             } if last_sync else None,
         }
+
+    async def list_manifest_targets(self) -> list[dict[str, str | None]]:
+        """List all cached manifest targets (module/submodule/version)."""
+        cursor = await self.storage.db.execute(
+            """
+            SELECT module, submodule, version
+            FROM local_manifest
+            ORDER BY module, submodule, version
+            """
+        )
+        rows = await cursor.fetchall()
+        return [
+            {
+                "module": row["module"],
+                "submodule": row["submodule"],
+                "version": row["version"],
+            }
+            for row in rows
+        ]
     
     async def list_modules(self) -> list[dict]:
         """List all synced modules with their versions.
@@ -494,10 +553,10 @@ class SyncOrchestrator:
         # Query distinct module/versions from documents
         cursor = await self.storage.db.execute(
             """
-            SELECT module, major_version, minor_version, patch_version, COUNT(*) as doc_count
+            SELECT module, submodule, major_version, minor_version, patch_version, COUNT(*) as doc_count
             FROM documents
-            GROUP BY module, major_version, minor_version, patch_version
-            ORDER BY module, major_version DESC, minor_version DESC, patch_version DESC
+            GROUP BY module, submodule, major_version, minor_version, patch_version
+            ORDER BY module, submodule, major_version DESC, minor_version DESC, patch_version DESC
             """
         )
         rows = await cursor.fetchall()
@@ -507,6 +566,7 @@ class SyncOrchestrator:
             version = f"{row['major_version']}.{row['minor_version']}.{row['patch_version']}"
             results.append({
                 "module": row["module"],
+                "submodule": row["submodule"],
                 "version": version,
                 "document_count": row["doc_count"],
             })

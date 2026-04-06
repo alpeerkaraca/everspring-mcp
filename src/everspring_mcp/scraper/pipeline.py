@@ -14,9 +14,9 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import sys
 import os
+import time
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, ClassVar, TYPE_CHECKING
@@ -29,9 +29,11 @@ from typing import Self
 from everspring_mcp.models.base import SHA256Hash, VersionedModel, compute_hash
 from everspring_mcp.models.content import ContentType, ScrapedPage
 from everspring_mcp.models.spring import SpringModule, SpringVersion
-from everspring_mcp.models.sync import S3ObjectRef, SyncManifest, FileEntry
+from everspring_mcp.models.sync import S3ObjectRef, SyncManifest
+from everspring_mcp.utils.logging import get_logger, setup_logging
 from .browser import BrowserConfig, SpringBrowser
 from .parser import ParserConfig, SpringDocParser
+from .registry import SubmoduleRegistry, SubmoduleTarget
 from .exceptions import (
     ContentExtractionError,
     NavigationError,
@@ -43,7 +45,7 @@ if TYPE_CHECKING:
     from .discovery import DiscoveryResult
 
 LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s - %(message)s"
-logger = logging.getLogger(__name__)
+logger = get_logger("scraper.pipeline")
 
 
 class PipelineStatus(str, Enum):
@@ -60,10 +62,12 @@ class ScrapeTarget(VersionedModel):
     Attributes:
         url: URL to scrape
         module: Spring module (BOOT, FRAMEWORK, etc.)
-        major: Major version number
+        submodule: Optional submodule key (e.g., redis)
+        major: Major version number (optional if auto-detected)
         minor: Minor version number (optional)
         patch: Patch version number (optional)
         content_type: Type of documentation
+        version_selector: CSS selector for version extraction
     """
     
     url: str = Field(
@@ -73,7 +77,12 @@ class ScrapeTarget(VersionedModel):
     module: SpringModule = Field(
         description="Spring module this page belongs to",
     )
-    major: int = Field(
+    submodule: str | None = Field(
+        default=None,
+        description="Optional submodule key",
+    )
+    major: int | None = Field(
+        default=None,
         ge=1,
         description="Major version number",
     )
@@ -90,6 +99,10 @@ class ScrapeTarget(VersionedModel):
     content_type: ContentType = Field(
         default=ContentType.REFERENCE,
         description="Type of documentation",
+    )
+    version_selector: str = Field(
+        default="span.version",
+        description="CSS selector for version extraction",
     )
     
     @field_validator("module", mode="before")
@@ -133,6 +146,8 @@ class ScrapeTarget(VersionedModel):
     @model_validator(mode="after")
     def validate_version(self) -> Self:
         """Ensure version meets minimum requirements."""
+        if self.major is None:
+            return self
         # Create SpringVersion to validate minimum version
         SpringVersion(
             module=self.module,
@@ -143,8 +158,10 @@ class ScrapeTarget(VersionedModel):
         return self
     
     @property
-    def version(self) -> SpringVersion:
+    def version(self) -> SpringVersion | None:
         """Get SpringVersion from target specification."""
+        if self.major is None:
+            return None
         return SpringVersion(
             module=self.module,
             major=self.major,
@@ -152,10 +169,11 @@ class ScrapeTarget(VersionedModel):
             patch=self.patch,
         )
     
-    @property
-    def s3_key_prefix(self) -> str:
-        """Generate S3 key prefix for this target."""
-        version_str = f"{self.major}.{self.minor}.{self.patch}"
+    def s3_key_prefix_for(self, version: SpringVersion) -> str:
+        """Generate S3 key prefix for this target and version."""
+        version_str = f"{version.major}.{version.minor}.{version.patch}"
+        if self.submodule:
+            return f"{self.module.value}/{self.submodule}/{version_str}"
         return f"{self.module.value}/{version_str}"
 
 
@@ -595,7 +613,7 @@ class ScraperPipeline:
     def _generate_s3_key(self, target: ScrapeTarget, content_hash: str) -> str:
         """Generate S3 key for scraped content.
         
-        Format: {module}/{version}/{url_hash}.md
+        Format: {module}/{submodule?}/{version}/{url_hash}.md
         
         Args:
             target: Scrape target
@@ -606,7 +624,9 @@ class ScraperPipeline:
         """
         # Use URL hash for unique identification
         url_hash = compute_hash(target.url)[:16]
-        return f"{target.s3_key_prefix}/{url_hash}.md"
+        if not target.version:
+            raise ValueError("Target version is required for S3 key generation")
+        return f"{target.s3_key_prefix_for(target.version)}/{url_hash}.md"
     
     def _generate_metadata_key(self, target: ScrapeTarget) -> str:
         """Generate S3 key for scraped page metadata.
@@ -618,7 +638,9 @@ class ScraperPipeline:
             S3 object key for metadata JSON
         """
         url_hash = compute_hash(target.url)[:16]
-        return f"{target.s3_key_prefix}/metadata/{url_hash}.json"
+        if not target.version:
+            raise ValueError("Target version is required for metadata key generation")
+        return f"{target.s3_key_prefix_for(target.version)}/metadata/{url_hash}.json"
     
     async def scrape_url(self, target: ScrapeTarget) -> ScrapeResult:
         """Scrape single URL and upload to S3.
@@ -642,13 +664,39 @@ class ScraperPipeline:
             logger.debug(f"Retrieved HTML: {len(raw_html)} chars")
             
             # Step 2: Parse - Convert to ScrapedPage model
-            scraped_page = self._parser.parse(
+            parser = self._parser
+            if target.version_selector != self.config.parser_config.version_selectors[0]:
+                parser = SpringDocParser(
+                    self.config.parser_config.model_copy(
+                        update={"version_selectors": [target.version_selector]}
+                    )
+                )
+            scraped_page = parser.parse(
                 html=raw_html,
                 url=target.url,
                 module=target.module,
                 version=target.version,
+                submodule=target.submodule,
                 content_type=target.content_type,
             )
+            if target.version_selector != self.config.parser_config.version_selectors[0]:
+                logger.debug(
+                    "Target version selector override in use: %s",
+                    target.version_selector,
+                )
+            if target.version is None:
+                target = target.model_copy(
+                    update={
+                        "major": scraped_page.version.major,
+                        "minor": scraped_page.version.minor,
+                        "patch": scraped_page.version.patch,
+                    }
+                )
+            elif scraped_page.version != target.version:
+                raise ContentExtractionError(
+                    f"Version mismatch: expected {target.version.version_string}, got {scraped_page.version.version_string}",
+                    url=target.url,
+                )
             
             content_hash = scraped_page.content_hash
             s3_key = self._generate_s3_key(target, content_hash)
@@ -667,8 +715,9 @@ class ScraperPipeline:
                 metadata={
                     "source-url": target.url,
                     "module": target.module.value,
-                    "version": target.version.version_string,
+                    "version": scraped_page.version.version_string,
                     "title": scraped_page.title[:256],  # Limit metadata size
+                    "submodule": target.submodule or "",
                 },
             )
             
@@ -748,11 +797,12 @@ class ScraperPipeline:
     
     async def discover_and_scrape(
         self,
-        entry_url: str,
-        module: SpringModule,
-        version: SpringVersion,
+        entry_url: str | None,
+        module: SpringModule | None,
+        version: SpringVersion | None,
         content_type: ContentType = ContentType.REFERENCE,
         concurrency: int = 3,
+        submodule: str | None = None,
     ) -> tuple[DiscoveryResult, list[ScrapeResult]]:
         """Discover and scrape all documentation pages.
         
@@ -773,6 +823,35 @@ class ScraperPipeline:
         """
         from .discovery import SpringDocDiscovery, DiscoveryConfig
         
+        if entry_url and module and version:
+            return await self._discover_and_scrape_target(
+                entry_url=entry_url,
+                module=module,
+                version=version,
+                content_type=content_type,
+                concurrency=concurrency,
+                submodule=submodule,
+            )
+
+        if entry_url or module or version:
+            raise ValueError("entry_url, module, and version must be provided together")
+
+        return await self._discover_and_scrape_registry(
+            content_type=content_type,
+            concurrency=concurrency,
+        )
+
+    async def _discover_and_scrape_target(
+        self,
+        entry_url: str,
+        module: SpringModule,
+        version: SpringVersion,
+        content_type: ContentType,
+        concurrency: int,
+        submodule: str | None,
+    ) -> tuple[DiscoveryResult, list[ScrapeResult]]:
+        from .discovery import SpringDocDiscovery, DiscoveryConfig
+        
         logger.info(f"Starting discover_and_scrape from: {entry_url}")
         
         # Create discovery with same browser config
@@ -783,7 +862,12 @@ class ScraperPipeline:
         discovery = SpringDocDiscovery(discovery_config)
         
         # Run discovery
-        discovery_result = await discovery.discover(entry_url, module, version)
+        discovery_result = await discovery.discover(
+            entry_url,
+            module,
+            version,
+            content_type=content_type,
+        )
         
         if discovery_result.link_count == 0:
             logger.warning("No links discovered, nothing to scrape")
@@ -792,11 +876,91 @@ class ScraperPipeline:
         logger.info(f"Discovered {discovery_result.link_count} links, starting batch scrape")
         
         # Convert to targets
-        targets = discovery_result.to_scrape_targets(content_type)
+        targets = discovery_result.to_scrape_targets(
+            content_type,
+            submodule=submodule,
+            auto_version=content_type != ContentType.API_DOC,
+        )
         
         # Run batch scraping
         scrape_results = await self.process_batch(targets, concurrency)
         
+        return discovery_result, scrape_results
+
+    async def _discover_and_scrape_registry(
+        self,
+        content_type: ContentType,
+        concurrency: int,
+    ) -> tuple[DiscoveryResult, list[ScrapeResult]]:
+        registry_path = Path("config") / "submodules.json"
+        registry = SubmoduleRegistry.load(registry_path)
+        return await self.discover_and_scrape_registry(
+            registry=registry,
+            content_type=content_type,
+            concurrency=concurrency,
+        )
+
+    async def discover_and_scrape_registry(
+        self,
+        registry: SubmoduleRegistry,
+        content_type: ContentType = ContentType.REFERENCE,
+        concurrency: int = 3,
+    ) -> tuple[DiscoveryResult, list[ScrapeResult]]:
+        """Discover and scrape using an explicit submodule registry."""
+        all_results: list[ScrapeResult] = []
+        last_discovery: DiscoveryResult | None = None
+
+        for target in registry.targets:
+            discovery_result, scrape_results = await self._discover_for_registry_target(
+                target=target,
+                content_type=content_type,
+                concurrency=concurrency,
+            )
+            last_discovery = discovery_result
+            all_results.extend(scrape_results)
+
+        if not last_discovery:
+            raise ValueError("Submodule registry is empty")
+        return last_discovery, all_results
+
+    async def _discover_for_registry_target(
+        self,
+        target: SubmoduleTarget,
+        content_type: ContentType,
+        concurrency: int,
+    ) -> tuple[DiscoveryResult, list[ScrapeResult]]:
+        discovery_config = DiscoveryConfig(
+            browser_config=self.config.browser_config,
+            parser_config=self.config.parser_config.model_copy(
+                update={"version_selectors": [target.version_selector]}
+            ),
+        )
+        discovery = SpringDocDiscovery(discovery_config)
+
+        entry_version = SpringVersion(
+            module=target.module_key,
+            major=target.module_key.minimum_supported_version,
+        )
+        discovery_result = await discovery.discover(
+            target.base_url,
+            target.module_key,
+            entry_version,
+            content_type=content_type,
+        )
+        targets = [
+            ScrapeTarget(
+                url=link.url,
+                module=target.module_key,
+                submodule=target.submodule_key,
+                major=None,
+                minor=0,
+                patch=0,
+                content_type=content_type,
+                version_selector=target.version_selector,
+            )
+            for link in discovery_result.links
+        ]
+        scrape_results = await self.process_batch(targets, concurrency)
         return discovery_result, scrape_results
 
 
@@ -840,11 +1004,8 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     Returns:
         Lambda response with status and results
     """
-    # Configure logging for Lambda
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    )
+    # Configure centralized logging for Lambda entrypoint usage.
+    setup_logging(level="INFO", console=True, file=True, name="scraper")
     
     logger.info(f"Lambda invoked with event: {json.dumps(event, default=str)[:500]}")
     

@@ -64,6 +64,7 @@ def sample_document() -> DocumentRecord:
         url="https://docs.spring.io/spring-boot/reference/getting-started.html",
         title="Getting Started",
         module="spring-boot",
+        submodule=None,
         major_version=4,
         minor_version=0,
         patch_version=5,
@@ -245,6 +246,7 @@ class TestDocumentRepository:
             url=sample_document.url,
             title="Updated Title",
             module=sample_document.module,
+            submodule=sample_document.submodule,
             major_version=sample_document.major_version,
             minor_version=sample_document.minor_version,
             patch_version=sample_document.patch_version,
@@ -276,6 +278,9 @@ class TestDocumentRepository:
         docs = await repo.get_by_module_version("spring-boot", 4)
         assert len(docs) == 1
         assert docs[0].id == sample_document.id
+
+        docs_with_submodule = await repo.get_by_module_version("spring-boot", 4, submodule="redis")
+        assert len(docs_with_submodule) == 0
     
     async def test_get_unindexed(
         self,
@@ -309,6 +314,29 @@ class TestDocumentRepository:
         retrieved = await repo.get_by_id(sample_document.id)
         assert retrieved is not None
         assert retrieved.is_indexed is True
+
+    async def test_reset_indexed(
+        self,
+        db: aiosqlite.Connection,
+        sample_document: DocumentRecord,
+    ) -> None:
+        """Test resetting indexed flags back to unindexed."""
+        repo = DocumentRepository(db)
+        doc = DocumentRecord(
+            **{
+                **sample_document.model_dump(),
+                "is_indexed": True,
+                "synced_at": datetime.now(timezone.utc),
+            }
+        )
+        await repo.insert(doc)
+
+        reset = await repo.reset_indexed()
+        assert reset == 1
+
+        retrieved = await repo.get_by_id(sample_document.id)
+        assert retrieved is not None
+        assert retrieved.is_indexed is False
     
     async def test_mark_synced(
         self,
@@ -447,6 +475,9 @@ class TestSyncHistoryRepository:
         history = await repo.get_history("spring-boot", limit=10)
         assert len(history) == 2
 
+        history_submodule = await repo.get_history("spring-boot", submodule="redis", limit=10)
+        assert len(history_submodule) == 0
+
 
 # ============================================================================
 # LocalManifestRepository Tests
@@ -476,6 +507,9 @@ class TestLocalManifestRepository:
         assert record.module == "spring-boot"
         assert record.version == "4.0.5"
         assert record.manifest_hash == "e" * 64
+
+        record_submodule = await repo.get("spring-boot", "4.0.5", submodule="redis")
+        assert record_submodule is None
     
     async def test_get_manifest_object(
         self,
@@ -603,6 +637,7 @@ class TestDocumentRecord:
             "url": "https://example.com",
             "title": "Test",
             "module": "spring-boot",
+            "submodule": None,
             "major_version": 4,
             "minor_version": 1,
             "patch_version": 2,

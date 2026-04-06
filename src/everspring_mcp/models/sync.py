@@ -160,6 +160,10 @@ class KnowledgePack(TimestampedModel):
     module: SpringModule = Field(
         description="Spring module this pack covers",
     )
+    submodule: str | None = Field(
+        default=None,
+        description="Optional submodule this pack covers",
+    )
     version: SpringVersion = Field(
         description="Spring version this pack documents",
     )
@@ -184,6 +188,11 @@ class KnowledgePack(TimestampedModel):
                     f"Document {doc.id} module {doc.module} does not match "
                     f"pack module {self.module}"
                 )
+            if doc.submodule != self.submodule:
+                raise ValueError(
+                    f"Document {doc.id} submodule {doc.submodule} does not match "
+                    f"pack submodule {self.submodule}"
+                )
         return self
     
     @computed_field
@@ -195,6 +204,8 @@ class KnowledgePack(TimestampedModel):
     @property
     def pack_name(self) -> str:
         """Generate pack name from module and version."""
+        if self.submodule:
+            return f"{self.module.value}-{self.submodule}-{self.version.version_string}"
         return f"{self.module.value}-{self.version.version_string}"
     
     def __str__(self) -> str:

@@ -22,6 +22,8 @@ EverSpring solves this by creating a verified bridge between official Spring doc
 - **Semantic Search:** Find the right Spring patterns using `google/embedding-gemma-300m` embeddings.
 - **Deprecation Guard:** Automatically flags deprecated APIs based on current release notes.
 - **Zero-Config Sync:** Automatically pulls the latest "Knowledge Pack" from S3 via incremental sync.
+- **Auto Version Detection:** Scraper reads `span.version` and fails fast when missing or invalid.
+- **Multi-Module Families:** Explicit registry supports Spring Data/Cloud submodules with per-submodule versioning.
 
 ## 💻 Tech Stack
 - **Language:** Python 3.11+
@@ -31,6 +33,27 @@ EverSpring solves this by creating a verified bridge between official Spring doc
 - **Scraping:** Playwright (for JS-rendered Spring docs)
 - **Cloud:** AWS Lambda, S3, EventBridge, Boto3
 - **IaC:** Terraform
+
+## 🔄 Current Flow (High Level)
+- Lambda scrapes docs using Playwright, extracts `span.version`, and converts HTML to Markdown.
+- Content is stored in S3 under `docs/{module}/{submodule}/{version}` (or without submodule).
+- Local MCP syncs incrementally via manifests and validates hashes.
+- ChromaDB indexes chunks with module/submodule/version metadata for filtered retrieval.
+
+## ⚡ Cold-Start Optimization
+Before running MCP search tools in a fresh environment, pre-download the embedding model cache:
+
+```bash
+uv run python -m everspring_mcp.main model-cache
+```
+
+Optional overrides:
+
+```bash
+uv run python -m everspring_mcp.main model-cache --embed-model google/embeddinggemma-300m --batch-size 32 --json
+```
+
+This reduces first-query latency by loading `sentence_transformers` and model artifacts ahead of time.
 
 ---
 *Created by Alper Karaca - Aiming to bridge the gap between Java Excellence and AI Efficiency.*

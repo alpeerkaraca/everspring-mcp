@@ -10,20 +10,22 @@ Supports schema migrations for backward compatibility.
 
 from __future__ import annotations
 
-import logging
+import time
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import aiosqlite
 
+from ..utils.logging import get_logger
+
 if TYPE_CHECKING:
     pass
 
-logger = logging.getLogger(__name__)
+logger = get_logger("storage.schema")
 
 # Current schema version - increment when schema changes
-CURRENT_SCHEMA_VERSION = 1
+CURRENT_SCHEMA_VERSION = 2
 
 
 class TableName(str, Enum):
@@ -68,6 +70,7 @@ CREATE TABLE IF NOT EXISTS documents (
 CREATE TABLE IF NOT EXISTS sync_history (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     module TEXT NOT NULL,                   -- Spring module
+    submodule TEXT,                         -- Optional submodule
     version TEXT NOT NULL,                  -- Version string "4.0.5"
     status TEXT NOT NULL,                   -- pending, in_progress, completed, failed
     started_at TEXT NOT NULL,               -- ISO timestamp
@@ -83,11 +86,12 @@ CREATE TABLE IF NOT EXISTS sync_history (
 -- Local manifest cache
 CREATE TABLE IF NOT EXISTS local_manifest (
     module TEXT NOT NULL,
+    submodule TEXT,
     version TEXT NOT NULL,
     manifest_hash TEXT NOT NULL,            -- SHA256 of manifest content
     manifest_json TEXT NOT NULL,            -- Full manifest JSON
     fetched_at TEXT NOT NULL,               -- ISO timestamp
-    PRIMARY KEY (module, version)
+    PRIMARY KEY (module, submodule, version)
 );
 
 -- Indexes for common queries
@@ -100,7 +104,81 @@ CREATE INDEX IF NOT EXISTS idx_documents_is_indexed
 CREATE INDEX IF NOT EXISTS idx_documents_s3_key 
     ON documents(s3_key);
 CREATE INDEX IF NOT EXISTS idx_sync_history_module_version 
-    ON sync_history(module, version);
+    ON sync_history(module, submodule, version);
+CREATE INDEX IF NOT EXISTS idx_sync_history_status 
+    ON sync_history(status);
+CREATE INDEX IF NOT EXISTS idx_local_manifest_module_version
+    ON local_manifest(module, submodule, version);
+"""
+
+SCHEMA_V2 = """
+-- Schema version tracking
+CREATE TABLE IF NOT EXISTS schema_version (
+    version INTEGER PRIMARY KEY,
+    applied_at TEXT NOT NULL DEFAULT (datetime('now')),
+    description TEXT
+);
+
+-- Main documents table
+CREATE TABLE IF NOT EXISTS documents (
+    id TEXT PRIMARY KEY,                    -- SHA256 hash of URL (stable ID)
+    url TEXT NOT NULL UNIQUE,               -- Original source URL
+    title TEXT NOT NULL,                    -- Page title
+    module TEXT NOT NULL,                   -- spring-boot, spring-framework, etc.
+    submodule TEXT,                         -- Optional submodule key
+    major_version INTEGER NOT NULL,         -- Major version number
+    minor_version INTEGER NOT NULL DEFAULT 0,
+    patch_version INTEGER NOT NULL DEFAULT 0,
+    content_hash TEXT NOT NULL,             -- SHA256 of markdown content
+    file_path TEXT NOT NULL,                -- Local relative path
+    s3_key TEXT NOT NULL,                   -- S3 object key
+    size_bytes INTEGER NOT NULL,            -- File size in bytes
+    scraped_at TEXT NOT NULL,               -- ISO timestamp when scraped
+    synced_at TEXT,                         -- ISO timestamp when synced locally
+    schema_version TEXT NOT NULL,           -- For backward compat
+    is_indexed INTEGER NOT NULL DEFAULT 0,  -- Has been vectorized? (0/1)
+    UNIQUE(module, submodule, major_version, file_path)
+);
+
+-- Sync history for auditing
+CREATE TABLE IF NOT EXISTS sync_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    module TEXT NOT NULL,                   -- Spring module
+    submodule TEXT,                         -- Optional submodule
+    version TEXT NOT NULL,                  -- Version string "4.0.5"
+    status TEXT NOT NULL,                   -- pending, in_progress, completed, failed
+    started_at TEXT NOT NULL,               -- ISO timestamp
+    completed_at TEXT,                      -- ISO timestamp
+    files_added INTEGER NOT NULL DEFAULT 0,
+    files_modified INTEGER NOT NULL DEFAULT 0,
+    files_removed INTEGER NOT NULL DEFAULT 0,
+    bytes_downloaded INTEGER NOT NULL DEFAULT 0,
+    error_message TEXT,
+    manifest_version TEXT                   -- S3 manifest version used
+);
+
+-- Local manifest cache
+CREATE TABLE IF NOT EXISTS local_manifest (
+    module TEXT NOT NULL,
+    submodule TEXT,
+    version TEXT NOT NULL,
+    manifest_hash TEXT NOT NULL,            -- SHA256 of manifest content
+    manifest_json TEXT NOT NULL,            -- Full manifest JSON
+    fetched_at TEXT NOT NULL,               -- ISO timestamp
+    PRIMARY KEY (module, submodule, version)
+);
+
+-- Indexes for common queries
+CREATE INDEX IF NOT EXISTS idx_documents_module_version 
+    ON documents(module, submodule, major_version, minor_version);
+CREATE INDEX IF NOT EXISTS idx_documents_content_hash 
+    ON documents(content_hash);
+CREATE INDEX IF NOT EXISTS idx_documents_is_indexed 
+    ON documents(is_indexed);
+CREATE INDEX IF NOT EXISTS idx_documents_s3_key 
+    ON documents(s3_key);
+CREATE INDEX IF NOT EXISTS idx_sync_history_module_version 
+    ON sync_history(module, submodule, version);
 CREATE INDEX IF NOT EXISTS idx_sync_history_status 
     ON sync_history(status);
 """
@@ -120,6 +198,7 @@ def get_schema_sql(version: int = CURRENT_SCHEMA_VERSION) -> str:
     """
     schemas = {
         1: SCHEMA_V1,
+        2: SCHEMA_V2,
     }
     
     if version not in schemas:
@@ -210,8 +289,20 @@ class SchemaManager:
         """
         # Define migrations as version -> migration function
         migrations: dict[int, str] = {
-            # Future migrations go here
-            # 1: "ALTER TABLE documents ADD COLUMN new_field TEXT;",
+            2: """
+            ALTER TABLE documents ADD COLUMN submodule TEXT;
+            ALTER TABLE sync_history ADD COLUMN submodule TEXT;
+            ALTER TABLE local_manifest ADD COLUMN submodule TEXT;
+            DROP INDEX IF EXISTS idx_documents_module_version;
+            DROP INDEX IF EXISTS idx_sync_history_module_version;
+            DROP INDEX IF EXISTS idx_local_manifest_module_version;
+            CREATE INDEX IF NOT EXISTS idx_documents_module_version 
+                ON documents(module, submodule, major_version, minor_version);
+            CREATE INDEX IF NOT EXISTS idx_sync_history_module_version 
+                ON sync_history(module, submodule, version);
+            CREATE INDEX IF NOT EXISTS idx_local_manifest_module_version 
+                ON local_manifest(module, submodule, version);
+            """,
         }
         
         for version in range(from_version + 1, CURRENT_SCHEMA_VERSION + 1):

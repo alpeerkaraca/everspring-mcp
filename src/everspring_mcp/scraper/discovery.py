@@ -9,8 +9,8 @@ This module provides URL discovery for Spring documentation:
 
 from __future__ import annotations
 
-import logging
 import re
+import time
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Self
@@ -21,13 +21,14 @@ from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validat
 from ..models.base import VersionedModel, compute_hash
 from ..models.content import ContentType
 from ..models.spring import SpringModule, SpringVersion
+from ..utils.logging import get_logger
 from .browser import BrowserConfig, SpringBrowser
 from .parser import ParserConfig, SpringDocParser, SPRING_DOC_SELECTORS
 from .exceptions import ContentExtractionError, NavigationError, ScraperError
 from .pipeline import ScrapeTarget
 
 
-logger = logging.getLogger(__name__)
+logger = get_logger("scraper.discovery")
 
 
 # File extensions to skip during discovery
@@ -37,13 +38,18 @@ SKIP_EXTENSIONS: set[str] = {
     ".css", ".js", ".woff", ".woff2", ".ttf", ".eot",
 }
 
-# URL patterns to skip
-SKIP_PATTERNS: list[re.Pattern] = [
-    re.compile(r"/api/"),  # Skip API javadoc links
-    re.compile(r"/javadoc/"),
+# URL patterns to skip for all content types
+BASE_SKIP_PATTERNS: list[re.Pattern] = [
     re.compile(r"github\.com"),
     re.compile(r"stackoverflow\.com"),
     re.compile(r"mailto:"),
+]
+
+# URL patterns to skip for non-API documentation
+REFERENCE_ONLY_SKIP_PATTERNS: list[re.Pattern] = [
+    re.compile(r"/api/"),
+    re.compile(r"/javadoc/"),
+    re.compile(r"/javadoc-api/"),
 ]
 
 
@@ -151,6 +157,7 @@ class DiscoveredLink(VersionedModel):
         self,
         module: SpringModule,
         version: SpringVersion,
+        submodule: str | None = None,
         content_type: ContentType = ContentType.REFERENCE,
     ) -> ScrapeTarget:
         """Convert to ScrapeTarget for pipeline processing.
@@ -158,6 +165,7 @@ class DiscoveredLink(VersionedModel):
         Args:
             module: Spring module
             version: Spring version
+            submodule: Optional submodule key
             content_type: Documentation type
             
         Returns:
@@ -166,6 +174,7 @@ class DiscoveredLink(VersionedModel):
         return ScrapeTarget(
             url=self.url,
             module=module,
+            submodule=submodule,
             major=version.major,
             minor=version.minor,
             patch=version.patch,
@@ -253,17 +262,34 @@ class DiscoveryResult(VersionedModel):
     def to_scrape_targets(
         self,
         content_type: ContentType = ContentType.REFERENCE,
+        submodule: str | None = None,
+        auto_version: bool = False,
     ) -> list[ScrapeTarget]:
         """Convert all links to ScrapeTargets.
         
         Args:
             content_type: Documentation type for all targets
+            submodule: Optional submodule key
+            auto_version: When True, leave version fields unset for auto-detection
             
         Returns:
             List of ScrapeTarget objects
         """
+        if auto_version:
+            return [
+                ScrapeTarget(
+                    url=link.url,
+                    module=self.module,
+                    submodule=submodule,
+                    major=None,
+                    minor=0,
+                    patch=0,
+                    content_type=content_type,
+                )
+                for link in self.links
+            ]
         return [
-            link.to_scrape_target(self.module, self.version, content_type)
+            link.to_scrape_target(self.module, self.version, submodule, content_type)
             for link in self.links
         ]
 
@@ -377,12 +403,17 @@ def is_internal_link(url: str, base_path: str) -> bool:
     return url.startswith(base_path)
 
 
-def should_skip_url(url: str, skip_extensions: set[str]) -> bool:
+def should_skip_url(
+    url: str,
+    skip_extensions: set[str],
+    content_type: ContentType = ContentType.REFERENCE,
+) -> bool:
     """Check if URL should be skipped.
     
     Args:
         url: URL to check
         skip_extensions: File extensions to skip
+        content_type: Discovery content type
         
     Returns:
         True if URL should be skipped
@@ -398,10 +429,16 @@ def should_skip_url(url: str, skip_extensions: set[str]) -> bool:
         if path.endswith(ext):
             return True
     
-    # Check patterns
-    for pattern in SKIP_PATTERNS:
+    # Check base patterns
+    for pattern in BASE_SKIP_PATTERNS:
         if pattern.search(url):
             return True
+
+    # API/javadoc links are only allowed in api-doc mode
+    if content_type != ContentType.API_DOC:
+        for pattern in REFERENCE_ONLY_SKIP_PATTERNS:
+            if pattern.search(url):
+                return True
     
     return False
 
@@ -481,6 +518,7 @@ class SpringDocDiscovery:
         html: str,
         page_url: str,
         base_path: str,
+        content_type: ContentType = ContentType.REFERENCE,
     ) -> list[tuple[str, str | None]]:
         """Extract links from a page's sidebar navigation.
         
@@ -534,7 +572,7 @@ class SpringDocDiscovery:
             if not is_internal_link(normalized, base_path):
                 continue
             
-            if should_skip_url(normalized, self.config.skip_extensions):
+            if should_skip_url(normalized, self.config.skip_extensions, content_type):
                 continue
             
             all_links.append((normalized, title))
@@ -546,6 +584,7 @@ class SpringDocDiscovery:
         entry_url: str,
         module: SpringModule,
         version: SpringVersion,
+        content_type: ContentType = ContentType.REFERENCE,
     ) -> DiscoveryResult:
         """Discover all documentation URLs from entry point.
         
@@ -556,6 +595,7 @@ class SpringDocDiscovery:
             entry_url: Starting URL for discovery
             module: Spring module being discovered
             version: Spring version
+            content_type: Discovery content type
             
         Returns:
             DiscoveryResult with all discovered links
@@ -621,7 +661,10 @@ class SpringDocDiscovery:
                         html = await browser.get_html()
                         
                         new_links = await self._extract_links_from_page(
-                            html, url, base_path
+                            html,
+                            url,
+                            base_path,
+                            content_type=content_type,
                         )
                         
                         self._total_found += len(new_links)
@@ -702,5 +745,6 @@ __all__ = [
     "flatten_nav_items",
     # Constants
     "SKIP_EXTENSIONS",
-    "SKIP_PATTERNS",
+    "BASE_SKIP_PATTERNS",
+    "REFERENCE_ONLY_SKIP_PATTERNS",
 ]
