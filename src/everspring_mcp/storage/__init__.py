@@ -6,16 +6,16 @@ This module provides SQLite-based storage for document metadata:
 - Pydantic model ↔ SQLite row conversion
 """
 
-from .schema import (
+from everspring_mcp.storage.repository import (
+    DocumentRepository,
+    LocalManifestRepository,
+    StorageManager,
+    SyncHistoryRepository,
+)
+from everspring_mcp.storage.schema import (
     CURRENT_SCHEMA_VERSION,
     SchemaManager,
     get_schema_sql,
-)
-from .repository import (
-    DocumentRepository,
-    SyncHistoryRepository,
-    LocalManifestRepository,
-    StorageManager,
 )
 
 __all__ = [

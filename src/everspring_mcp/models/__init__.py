@@ -8,7 +8,7 @@ This package provides all data models for the EverSpring MCP system:
 - S3 sync and Knowledge Pack models
 """
 
-from .base import (
+from everspring_mcp.models.base import (
     HashableContent,
     HttpUrl,
     MarkdownContent,
@@ -18,7 +18,7 @@ from .base import (
     compute_hash,
     validate_sha256_hash,
 )
-from .content import (
+from everspring_mcp.models.content import (
     ApiClassSignature,
     CodeExample,
     CodeLanguage,
@@ -30,18 +30,18 @@ from .content import (
     MethodSignature,
     ScrapedPage,
 )
-from .metadata import (
+from everspring_mcp.models.metadata import (
     DeprecatedAPI,
     DocumentIndex,
     DocumentMetadata,
     SearchableDocument,
 )
-from .spring import (
+from everspring_mcp.models.spring import (
     SpringModule,
     SpringVersion,
     VersionRange,
 )
-from .sync import (
+from everspring_mcp.models.sync import (
     ChangeType,
     FileChange,
     FileEntry,
