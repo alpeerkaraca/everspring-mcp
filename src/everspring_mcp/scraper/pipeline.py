@@ -28,19 +28,22 @@ from everspring_mcp.models.base import SHA256Hash, VersionedModel, compute_hash
 from everspring_mcp.models.content import ContentType
 from everspring_mcp.models.spring import SpringModule, SpringVersion
 from everspring_mcp.models.sync import S3ObjectRef, SyncManifest
-from everspring_mcp.utils.logging import get_logger, setup_logging
-
-from .browser import BrowserConfig, NotModifiedSignal, SpringBrowser
-from .exceptions import (
+from everspring_mcp.scraper.browser import (
+    BrowserConfig,
+    NotModifiedSignal,
+    SpringBrowser,
+)
+from everspring_mcp.scraper.exceptions import (
     ContentExtractionError,
     NavigationError,
     RateLimitError,
 )
-from .parser import ParserConfig, SpringDocParser
-from .registry import SubmoduleRegistry, SubmoduleTarget
+from everspring_mcp.scraper.parser import ParserConfig, SpringDocParser
+from everspring_mcp.scraper.registry import SubmoduleRegistry, SubmoduleTarget
+from everspring_mcp.utils.logging import get_logger, setup_logging
 
 if TYPE_CHECKING:
-    from .discovery import DiscoveryResult
+    from everspring_mcp.scraper import DiscoveryResult
 
 LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s - %(message)s"
 logger = get_logger("scraper.pipeline")
@@ -677,7 +680,7 @@ class ScraperPipeline:
             stored_precheck_hash: str | None = None
             fast_precheck_hash: str | None = None
 
-                # Preload stored hashes for fast no-change detection when version is known.
+            # Preload stored hashes for fast no-change detection when version is known.
             if self.config.enable_hash_check and target.version is not None:
                 # Key is URL-derived from target URL + normalized module/version path.
                 s3_key = self._generate_s3_key(target)
@@ -908,7 +911,7 @@ class ScraperPipeline:
         concurrency: int,
         submodule: str | None,
     ) -> tuple[DiscoveryResult, list[ScrapeResult]]:
-        from .discovery import DiscoveryConfig, SpringDocDiscovery
+        from everspring_mcp.scraper import DiscoveryConfig, SpringDocDiscovery
 
         logger.info(f"Starting discover_and_scrape from: {entry_url}")
 
@@ -1173,11 +1176,11 @@ if __name__ == "__main__":
 
     # Ensure environment variables are set
     if not os.environ.get("EVERSPRING_S3_BUCKET"):
-        print("Error: EVERSPRING_S3_BUCKET environment variable not set")
+        logger.error("EVERSPRING_S3_BUCKET environment variable not set")
         sys.exit(1)
 
     result = lambda_handler(test_event, None)
-    print(json.dumps(result, indent=2, default=str))
+    logger.info(json.dumps(result, indent=2, default=str))
 
 
 __all__ = [

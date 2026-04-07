@@ -11,13 +11,15 @@ from __future__ import annotations
 
 import argparse
 import csv
+import logging
 import re
 import subprocess
-import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+
+logger = logging.getLogger("run_scrape_matrix")
 
 
 @dataclass(frozen=True)
@@ -40,6 +42,7 @@ class JobResult:
 
 def _safe_name(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "_", value).strip("_") or "job"
+
 
 def _normalize_prefix(value: str) -> str:
     """Normalize S3 prefixes to avoid leading/trailing slash mismatches."""
@@ -147,7 +150,13 @@ def run_job(
     try:
         with log_path.open("w", encoding="utf-8") as log_fh:
             log_fh.write(f"COMMAND: {' '.join(cmd)}\n\n")
-            print(f"Job: {job.module}/{sub} [{job.content_type}] -> {log_path}")
+            logger.info(
+                "Job: %s/%s [%s] -> %s",
+                job.module,
+                sub,
+                job.content_type,
+                log_path,
+            )
             completed = subprocess.run(
                 cmd,
                 cwd=repo_root,
@@ -217,6 +226,10 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
+    )
     args = parse_args()
     repo_root = Path(__file__).resolve().parents[1]
     csv_path = (repo_root / args.csv).resolve()
@@ -235,23 +248,24 @@ def main() -> int:
             api_prefix=args.api_prefix,
         )
     except ValueError as exc:
-        print(f"Invalid scrape matrix configuration: {exc}", file=sys.stderr)
+        logger.error("Invalid scrape matrix configuration: %s", exc)
         return 2
 
     if not jobs:
-        print(f"No jobs found in {csv_path}")
+        logger.info("No jobs found in %s", csv_path)
         return 0
 
-    print(f"Loaded {len(jobs)} jobs from {csv_path}")
-    print(
-        f"Running with {args.parallel_jobs} parallel jobs and "
-        f"{args.scrape_concurrency} scrape concurrency per job."
+    logger.info("Loaded %d jobs from %s", len(jobs), csv_path)
+    logger.info(
+        "Running with %d parallel jobs and %d scrape concurrency per job.",
+        args.parallel_jobs,
+        args.scrape_concurrency,
     )
 
     if args.dry_run:
         for job in jobs:
             cmd = build_command(job, repo_root, args.scrape_concurrency, args.uv_bin)
-            print(" ".join(cmd))
+            logger.info("%s", " ".join(cmd))
         return 0
 
     failures: list[JobResult] = []
@@ -274,12 +288,17 @@ def main() -> int:
             lane = f"{result.job.module}/{result.job.submodule or 'root'} [{result.job.content_type}]"
             if result.exit_code == 0:
                 successes += 1
-                print(f"[OK]   {lane} -> {result.log_path}")
+                logger.info("[OK]   %s -> %s", lane, result.log_path)
             else:
                 failures.append(result)
-                print(f"[FAIL] {lane} (exit {result.exit_code}) -> {result.log_path}")
+                logger.error(
+                    "[FAIL] %s (exit %d) -> %s",
+                    lane,
+                    result.exit_code,
+                    result.log_path,
+                )
 
-    print(f"\nCompleted: {successes} succeeded, {len(failures)} failed.")
+    logger.info("Completed: %d succeeded, %d failed.", successes, len(failures))
     return 1 if failures else 0
 
 
