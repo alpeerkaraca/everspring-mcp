@@ -1,17 +1,17 @@
 """EverSpring MCP - MCP Server and Client implementation.
 
 This module provides:
-- MCPServer: FastMCP-based server exposing Spring documentation tools
-- MCPClient: Client interface for interacting with the server
+- MCPServer: MCP SDK server exposing Spring documentation tools
+- LocalSearchCLI: Client interface for interacting with the RAG directly from the terminal
 - Tools: Vector search with score thresholds and progress notifications
 """
 
-from .server import MCPServer
-from .client import MCPClient
-from .tools import SpringDocsTool
+from everspring_mcp.mcp.terminal_search import LocalSearchCLI
+from everspring_mcp.mcp.server import MCPServer
+from everspring_mcp.mcp.tools import SpringDocsTool
 
 __all__ = [
     "MCPServer",
-    "MCPClient",
+    "LocalSearchCLI",
     "SpringDocsTool",
 ]

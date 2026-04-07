@@ -12,12 +12,12 @@ from collections.abc import Callable
 from typing import Any
 from xml.sax.saxutils import escape, quoteattr
 
-from ..models.metadata import SearchResult
-from ..utils.logging import get_logger
-from ..vector.chroma_client import ChromaClient
-from ..vector.config import VectorConfig
-from ..vector.retriever import HybridRetriever
-from .models import (
+from everspring_mcp.models.metadata import SearchResult
+from everspring_mcp.utils.logging import get_logger
+from everspring_mcp.vector.chroma_client import ChromaClient
+from everspring_mcp.vector.config import VectorConfig
+from everspring_mcp.vector.retriever import HybridRetriever
+from everspring_mcp.mcp.models import (
     ModuleInfo,
     ProgressNotification,
     SearchParameters,
