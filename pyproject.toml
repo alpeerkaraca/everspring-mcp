@@ -50,10 +50,21 @@ dev = [
     "boto3-stubs[s3]>=1.28.0",
     "moto[s3]>=4.2.0",
 ]
+amd = [
+    "torch; sys_platform == 'linux' and platform_machine == 'x86_64' and python_version < '3.12'",
+]
+
+[[tool.uv.index]]
+name = "pytorch-rocm"
+url = "https://download.pytorch.org/whl/rocm7.2"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-rocm", marker = "extra == 'amd' and sys_platform == 'linux' and platform_machine == 'x86_64' and python_version < '3.12'" }]
 
 [project.scripts]
 everspring-mcp = "everspring_mcp.mcp.server:run_server"
-everspring-client = "everspring_mcp.mcp.client:run_interactive"
+everspring-client = "everspring_mcp.mcp.terminal_search:run_interactive"
 
 [project.urls]
 Homepage = "https://github.com/alpeerkaraca/everspring-mcp"

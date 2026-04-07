@@ -1,57 +1,95 @@
-# Agent Context: EverSpring MCP
+# EverSpring MCP Assistant Contract
 
-## Project Intent
-EverSpring MCP is a specialized RAG (Retrieval-Augmented Generation) system designed to provide LLMs with real-time, verified access to the Spring Ecosystem documentation (Spring Boot 4+, Spring Framework 7+, etc.).
+This document defines non-negotiable engineering constraints for AI assistants working in this repository.
 
-## Architecture Principles
-- **Hybrid Cloud:** AWS Lambda for scraping, S3 for distribution, and Local MCP for execution.
-- **Data Integrity:** Content must be validated via SHA-256 hashing before ingestion.
-- **Type Safety:** Strict use of Pydantic models for all data structures (No raw dicts).
-- **Asynchronous First:** Use `asyncio` and `httpx` for I/O bound operations (Scraping/API).
-- **Version Source of Truth:** Extract versions from documentation HTML (e.g., `span.version`) and fail scrapes when missing or invalid.
-- **Multi-Module Support:** Treat Spring Data/Cloud as submodule families with per-submodule versioning and storage paths.
+## Mission
 
-## Tech Stack Requirements
-- **Language:** Python 3.11+
-- **MCP Framework:** FastMCP (Python SDK)
-- **Database:** SQLite (Metadata) & ChromaDB (Vector, Persistent Storage)
-- **Cloud:** AWS Boto3 (S3 interaction)
-- **Scraping:** Playwright (for JS-rendered Spring docs)
+Maintain and improve an enterprise-grade Hybrid RAG pipeline for Spring documentation while preserving performance-critical architecture.
 
-## Embedding Strategy
-- **Model:** google/embedding-gemma-300m (Chosen for high-density semantic representation at low memory footprint).
-- **Vector DB:** ChromaDB (Persistent storage).
-- **Search:** Cosine Similarity with metadata filtering (Spring Version, Module).
+## Core Principle
 
-## Retrieval Strategy: Hybrid Search
-- **Dense Retrieval:** Cosine Similarity using `google/embedding-gemma-300m`.
-- **Sparse Retrieval:** BM25 (Best Matching 25) for exact keyword/annotation matching.
-- **Reranking/Fusion:** Implement Reciprocal Rank Fusion (RRF) to combine results from both scorers.
-- **Filtering:** Always apply metadata filters (version, module) BEFORE ranking.
+**Build on Power, Search on Light**
 
-## Role Definitions for Copilot
-- While performing every operation pay attention to security best practices, especially when handling data and interacting with AWS services.
-- When writing **Scrapers**: Focus on resilience, rate-limiting, and clean Markdown conversion.
-- When writing **Scrapers**: Use the explicit submodule registry for multi-module families (no auto-discovery).
-- When writing **MCP Tools**: Ensure clear docstrings as they are used by the LLM as tool definitions.
-- When writing **Sync Logic**: Prioritize "Incremental Sync" to minimize S3 egress costs.
-- When writing **Vectorization Logic**: Ensure that the embedding process is consistent and that metadata is correctly associated with each vector.
-- When writing **Tests**: Use `pytest` and focus on edge cases (e.g., handling doc structure changes, network failures).
-- When writing **Tests**: Include version extraction, registry handling, and title sanitization coverage.
-- When writing **LLM Prompts**: Ensure clarity and specificity to guide the LLM effectively, and include examples where possible.
-- When writing **Pydantic Models**: Define clear and concise models with appropriate validation to ensure data integrity throughout the system.
-- When writing **AWS Lambda Functions**: Focus on efficient resource usage, proper error handling, and secure access to AWS services (e.g., using IAM roles).
-- When writing **S3 Interaction Logic**: Ensure that all interactions with S3 are secure, efficient, and include proper error handling to manage potential issues with network or permissions.
-- When writing **S3 Interaction Logic**: Preserve submodule-aware paths (`docs/{module}/{submodule}/{version}` when submodule exists).
-- When writing **ChromaDB Logic**: Ensure that vector storage and retrieval are optimized for performance, and that metadata is correctly associated with each vector for effective filtering.
-- When writing **Terraform Scripts**: Follow best practices for infrastructure as code, including modularization, use of variables, and proper state management to ensure reproducibility and maintainability.
+- Build nodes (high-end GPU) handle indexing, BM25 generation, and snapshot publishing.
+- Search nodes (thin clients/laptops) restore snapshots and serve queries.
 
-## GitHub Repository Structure
-- When commiting code, ensure that it is well-documented and follows the project's coding standards. Use descriptive commit messages that clearly explain the changes made.
-- Make minimal commits that focus on a single change or feature to facilitate easier code reviews and maintain a clean commit history.
-- Organize the repository with clear directories for different components (e.g., `scrapers/`, `mcp_tools/`, `sync/`, `vectorization/`, `tests/`, `prompts/`, `models/`, `aws/`, `chroma/`, `terraform/`).
-- Use branches effectively to manage different features or bug fixes, and ensure that pull requests
-- Use Pull Requests before merging to the main branch, and include a clear description of the changes and any relevant context for reviewers. Ensure that all tests pass before merging.
+Do not collapse these roles in architecture changes unless explicitly requested.
 
-## Future Work Notes
-- Plan for a cron-based version check that reuses version extraction and registry targets.
+## Non-Negotiable Performance Rules
+
+### 1) Never Break the Buffer
+
+`vector/indexer.py` uses a producer-consumer design with a `pending_chunks` buffer.
+This buffering model is **sacred for performance**.
+
+- Do **not** revert to document-by-document synchronous indexing loops.
+- Do **not** remove producer-consumer buffering, even if a simpler loop looks cleaner.
+- Do **not** undo the GIL-avoidance design by forcing sequential chunking/embedding writes.
+- Keep concurrent chunk preparation.
+- Keep threshold-based embedding and Chroma write batching.
+- Keep mark-indexed behavior tied to successful vector writes.
+
+### 2) Keep Chroma Writes Batched
+
+- Do not replace batched upserts with per-document or per-chunk upserts.
+- Preserve configurable upsert batch sizing (`chroma_upsert_batch_size` / CLI override).
+
+### 3) Preserve Model-Aware Chunking
+
+- Chunk sizing must remain tokenizer-aware and respect token limits.
+- Do not replace model-token counting with naive character/word counting.
+
+## Hardware and Precision Constraints
+
+- GPU path is mandatory for optimized indexing.
+- `bfloat16` is mandatory by design in embedder loading.
+- Do not introduce `float32` or CPU fallback paths unless the user explicitly asks for them.
+
+### AMD ROCm Guidance
+
+- Package manager is `uv`.
+- ROCm PyTorch must be managed via `[project.optional-dependencies]` `amd` extra.
+- Required runtime environment for RX 9000 class GPUs:
+  - `HSA_OVERRIDE_GFX_VERSION=12.0.1`
+
+## Dependency and Tooling Policy
+
+- Use `uv` for dependency and run workflows.
+- Prefer existing project commands:
+  - `uv sync`
+  - `uv sync --extra amd`
+  - `uv run pytest -q`
+  - `uv run ruff check src tests`
+  - `uv run mypy src`
+
+Do not introduce ad-hoc package managers or runtime toolchains.
+
+## Retrieval Contract (Hybrid RRF)
+
+Any change to dense retrieval must account for the full hybrid stack:
+
+1. Dense retrieval in Chroma
+2. Sparse retrieval in BM25
+3. Fusion in `HybridRetriever` using RRF (`RRF_K`)
+
+If you modify Chroma query logic, you must evaluate and adjust BM25 and fusion behavior as needed. Never optimize one path while silently regressing hybrid relevance quality.
+Any adjustments to ranking behavior should explicitly consider `RRF_K`.
+
+## Data and Snapshot Contract
+
+- Snapshot upload/download flows are first-class operational paths.
+- BM25 persistence and restore behavior must remain aligned with snapshot workflows.
+- Preserve atomicity and rollback safety when altering snapshot apply logic.
+
+## Change Safety Checklist
+
+Before finalizing vector/search/sync changes:
+
+1. Verify indexing throughput assumptions still hold (concurrency + batching intact).
+2. Verify hardware constraints are still enforced (`CUDA` + `bfloat16`).
+3. Verify hybrid retrieval remains dense + sparse + RRF.
+4. Verify snapshot flows still keep build-node/search-node separation intact.
+
+## Communication Channel Integrity
+- Never use print() for debugging or status updates in the MCP serve path.
+- All non-JSON output MUST go through the centralized logger to sys.stderr. Any data on sys.stdout that is not a valid MCP JSON-RPC message will break the connection.
