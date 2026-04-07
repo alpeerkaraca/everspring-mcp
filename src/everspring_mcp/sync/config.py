@@ -7,9 +7,9 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from pathlib import Path
-from typing import ClassVar
+from typing import Any, ClassVar
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 def _default_data_dir() -> Path:
@@ -89,11 +89,17 @@ class SyncConfig(BaseModel):
     )
     
     # Sync settings
+    parallel_jobs: int = Field(
+        default=5,
+        ge=1,
+        le=200,
+        description="Parallel workers for manifest sync operations",
+    )
     download_concurrency: int = Field(
         default=5,
         ge=1,
-        le=20,
-        description="Max concurrent downloads",
+        le=200,
+        description="Legacy alias for parallel_jobs (kept for backward compatibility)",
     )
     chunk_size: int = Field(
         default=8192,
@@ -106,6 +112,26 @@ class SyncConfig(BaseModel):
     def validate_path(cls, v: str | Path) -> Path:
         """Convert string to Path."""
         return Path(v) if isinstance(v, str) else v
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_parallel_settings(cls, data: Any) -> Any:
+        """Keep parallel_jobs and download_concurrency in sync."""
+        if not isinstance(data, dict):
+            return data
+
+        values = dict(data)
+        has_parallel = values.get("parallel_jobs") is not None
+        has_download = values.get("download_concurrency") is not None
+
+        if has_parallel and not has_download:
+            values["download_concurrency"] = values["parallel_jobs"]
+        elif has_download and not has_parallel:
+            values["parallel_jobs"] = values["download_concurrency"]
+        elif has_parallel and has_download:
+            values["download_concurrency"] = values["parallel_jobs"]
+
+        return values
     
     @property
     def db_path(self) -> Path:

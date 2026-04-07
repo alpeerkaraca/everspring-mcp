@@ -6,9 +6,9 @@ This module provides S3 synchronization services:
 - Configuration models
 """
 
-from .config import SyncConfig
-from .s3_sync import S3SyncService
-from .orchestrator import SyncOrchestrator
+from everspring_mcp.sync.config import SyncConfig
+from everspring_mcp.sync.s3_sync import S3SyncService
+from everspring_mcp.sync.orchestrator import SyncOrchestrator
 
 __all__ = [
     "SyncConfig",
