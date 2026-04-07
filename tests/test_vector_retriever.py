@@ -122,3 +122,65 @@ async def test_search_no_dedup_returns_multiple_chunks(
     assert len(results) == 3
     assert results[-1].id == "doc3-0"
     assert {results[0].id, results[1].id} == {"doc1-0", "doc2-0"}
+
+
+def test_build_bm25_index_fetches_chroma_in_batches(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config = VectorConfig(data_dir=tmp_path, chroma_dir=tmp_path / "chroma")
+    retriever = HybridRetriever(config=config)
+
+    class FakeCollection:
+        def __init__(self) -> None:
+            self.calls: list[tuple[int, int]] = []
+
+        def count(self) -> int:
+            return 2501
+
+        def get(
+            self,
+            include: list[str],
+            limit: int,
+            offset: int,
+        ) -> dict[str, list[Any]]:
+            assert include == ["documents", "metadatas"]
+            self.calls.append((limit, offset))
+            end = min(offset + limit, 2501)
+            ids = [f"doc-{i}" for i in range(offset, end)]
+            return {
+                "ids": ids,
+                "documents": [f"content-{i}" for i in range(offset, end)],
+                "metadatas": [{"module": "spring-boot", "version_major": 4} for _ in ids],
+            }
+
+    fake_collection = FakeCollection()
+    monkeypatch.setattr(retriever._chroma, "get_collection", lambda: fake_collection)
+
+    captured: dict[str, int] = {}
+
+    def fake_build(
+        doc_ids: list[str],
+        documents: list[str],
+        metadatas: list[dict[str, Any]],
+    ) -> None:
+        captured["doc_ids"] = len(doc_ids)
+        captured["documents"] = len(documents)
+        captured["metadatas"] = len(metadatas)
+
+    monkeypatch.setattr(retriever._bm25, "build", fake_build)
+    monkeypatch.setattr(retriever._bm25, "save", lambda: captured.setdefault("saved", 1))
+
+    retriever.build_bm25_index()
+
+    assert fake_collection.calls == [
+        (retriever.BM25_BUILD_BATCH_SIZE, 0),
+        (retriever.BM25_BUILD_BATCH_SIZE, retriever.BM25_BUILD_BATCH_SIZE),
+        (retriever.BM25_BUILD_BATCH_SIZE, retriever.BM25_BUILD_BATCH_SIZE * 2),
+    ]
+    assert captured == {
+        "doc_ids": 2501,
+        "documents": 2501,
+        "metadatas": 2501,
+        "saved": 1,
+    }

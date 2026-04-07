@@ -58,9 +58,16 @@ class MarkdownChunker:
         self.max_tokens = max_tokens
         self.overlap_tokens = overlap_tokens
         self._tokenizer = AutoTokenizer.from_pretrained(model_name)
+
+    def _encode_tokens(self, text: str) -> list[int]:
+        return self._tokenizer.encode(
+            text,
+            add_special_tokens=False,
+            verbose=False,
+        )
     
     def _count_tokens(self, text: str) -> int:
-        return len(self._tokenizer.encode(text, add_special_tokens=False))
+        return len(self._encode_tokens(text))
     
     def _clean_content(self, text: str) -> str:
         """Remove Spring docs artifacts from content."""
@@ -106,7 +113,7 @@ class MarkdownChunker:
     
     def _split_by_tokens(self, text: str) -> list[str]:
         """Split text into token-limited chunks with natural boundaries."""
-        tokens = self._tokenizer.encode(text, add_special_tokens=False)
+        tokens = self._encode_tokens(text)
         if len(tokens) <= self.max_tokens:
             return [text]
 
@@ -127,7 +134,7 @@ class MarkdownChunker:
             if end == len(tokens):
                 break
 
-            used_tokens = len(self._tokenizer.encode(chunk_text, add_special_tokens=False))
+            used_tokens = len(self._encode_tokens(chunk_text))
             step = max(1, used_tokens - self.overlap_tokens)
             start += step
 

@@ -15,8 +15,8 @@ from typing import Any
 
 from rank_bm25 import BM25Okapi
 
-from ..utils.logging import get_logger
-from .config import VectorConfig
+from everspring_mcp.utils.logging import get_logger
+from everspring_mcp.vector.config import VectorConfig
 
 logger = get_logger("vector.bm25")
 

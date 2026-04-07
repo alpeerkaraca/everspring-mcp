@@ -8,8 +8,8 @@ from typing import Any
 import chromadb
 from chromadb.api.models.Collection import Collection
 
-from ..utils.logging import get_logger
-from .config import VectorConfig
+from everspring_mcp.utils.logging import get_logger
+from everspring_mcp.vector.config import VectorConfig
 
 logger = get_logger("vector.chroma")
 
