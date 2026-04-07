@@ -13,7 +13,7 @@ from typing import Self
 
 from pydantic import Field, model_validator
 
-from .base import VersionedModel
+from everspring_mcp.models.base import VersionedModel
 
 
 class SpringModule(str, Enum):

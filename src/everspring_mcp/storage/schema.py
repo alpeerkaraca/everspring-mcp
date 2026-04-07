@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING
 
 import aiosqlite
 
-from ..utils.logging import get_logger
+from everspring_mcp.utils.logging import get_logger
 
 if TYPE_CHECKING:
     pass

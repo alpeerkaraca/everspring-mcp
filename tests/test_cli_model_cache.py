@@ -65,5 +65,5 @@ async def test_run_model_cache_uses_defaults(
     assert exit_code == 0
     assert captured["prefetched"] is True
     assert captured["model_name"] == "google/embeddinggemma-300m"
-    assert captured["batch_size"] == 32
+    assert captured["batch_size"] == 128
 

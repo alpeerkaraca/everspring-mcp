@@ -18,14 +18,14 @@ from urllib.parse import urljoin, urlparse, urlunparse
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
 
-from ..models.base import VersionedModel, compute_hash
-from ..models.content import ContentType
-from ..models.spring import SpringModule, SpringVersion
-from ..utils.logging import get_logger
-from .browser import BrowserConfig, SpringBrowser
-from .parser import ParserConfig, SpringDocParser, SPRING_DOC_SELECTORS
-from .exceptions import ContentExtractionError, NavigationError, ScraperError
-from .pipeline import ScrapeTarget
+from everspring_mcp.models.base import VersionedModel, compute_hash
+from everspring_mcp.models.content import ContentType
+from everspring_mcp.models.spring import SpringModule, SpringVersion
+from everspring_mcp.utils.logging import get_logger
+from everspring_mcp.scraper.browser import BrowserConfig, SpringBrowser
+from everspring_mcp.scraper.parser import ParserConfig, SpringDocParser, SPRING_DOC_SELECTORS
+from everspring_mcp.scraper.exceptions import ContentExtractionError, NavigationError, ScraperError
+from everspring_mcp.scraper.pipeline import ScrapeTarget
 
 
 logger = get_logger("scraper.discovery")

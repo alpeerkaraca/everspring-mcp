@@ -15,7 +15,7 @@ from typing import Self
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
 
-from .base import (
+from everspring_mcp.models.base import (
     HttpUrl,
     MarkdownContent,
     SHA256Hash,
@@ -23,7 +23,7 @@ from .base import (
     VersionedModel,
     compute_hash,
 )
-from .spring import SpringModule, SpringVersion
+from everspring_mcp.models.spring import SpringModule, SpringVersion
 
 
 class ContentType(str, Enum):

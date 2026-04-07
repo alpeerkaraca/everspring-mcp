@@ -7,7 +7,7 @@ This package provides:
 
 __version__ = "0.1.0"
 
-from .models import (
+from everspring_mcp.models import (
     # Base
     HashableContent,
     TimestampedModel,
@@ -19,7 +19,7 @@ from .models import (
     # Content
     ScrapedPage,
 )
-from .scraper import (
+from everspring_mcp.scraper import (
     BrowserConfig,
     SpringBrowser,
 )

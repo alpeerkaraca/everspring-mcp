@@ -14,7 +14,7 @@ from typing import Self
 
 from pydantic import Field, computed_field, model_validator
 
-from .base import (
+from everspring_mcp.models.base import (
     HttpUrl,
     MarkdownContent,
     SHA256Hash,
@@ -22,14 +22,14 @@ from .base import (
     VersionedModel,
     compute_hash,
 )
-from .content import (
+from everspring_mcp.models.content import (
     CodeExample,
     ContentType,
     DeprecationInfo,
     DeprecationStatus,
     DocumentSection,
 )
-from .spring import SpringModule, SpringVersion, VersionRange
+from everspring_mcp.models.spring import SpringModule, SpringVersion, VersionRange
 
 
 class DocumentMetadata(TimestampedModel):

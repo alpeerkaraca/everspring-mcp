@@ -8,8 +8,8 @@ This package provides tools for scraping Spring documentation:
 - Custom exceptions for error handling
 """
 
-from .browser import BrowserConfig, NotModifiedSignal, SpringBrowser, USER_AGENTS
-from .discovery import (
+from everspring_mcp.scraper.browser import BrowserConfig, NotModifiedSignal, SpringBrowser, USER_AGENTS
+from everspring_mcp.scraper.discovery import (
     BASE_SKIP_PATTERNS,
     DiscoveredLink,
     DiscoveryConfig,
@@ -24,7 +24,7 @@ from .discovery import (
     should_skip_url,
     SKIP_EXTENSIONS,
 )
-from .exceptions import (
+from everspring_mcp.scraper.exceptions import (
     BrowserLaunchError,
     ContentExtractionError,
     NavigationError,
@@ -32,15 +32,15 @@ from .exceptions import (
     RateLimitError,
     ScraperError,
 )
-from .parser import (
+from everspring_mcp.scraper.parser import (
     LANGUAGE_PATTERNS,
     SPRING_DOC_SELECTORS,
     ParserConfig,
     SpringDocParser,
     SpringMarkdownConverter,
 )
-from .registry import SubmoduleRegistry, SubmoduleTarget
-from .pipeline import (
+from everspring_mcp.scraper.registry import SubmoduleRegistry, SubmoduleTarget
+from everspring_mcp.scraper.pipeline import (
     PipelineConfig,
     PipelineStatus,
     S3Client,

@@ -4,7 +4,7 @@ Provides commands for:
 - Scraping Spring docs into S3
 - Syncing knowledge packs or manifests from S3 into local stores
 - Indexing local docs into ChromaDB
-- Placeholder server command (not implemented yet)
+- Serving MCP tools over stdio
 """
 
 from __future__ import annotations
@@ -17,19 +17,22 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from everspring_mcp.models.spring import SpringModule, SpringVersion
 from everspring_mcp.models.content import ContentType
+from everspring_mcp.models.spring import SpringModule, SpringVersion
 from everspring_mcp.scraper.pipeline import PipelineConfig, ScraperPipeline
 from everspring_mcp.scraper.registry import SubmoduleRegistry
+from everspring_mcp.storage.repository import StorageManager
 from everspring_mcp.sync.config import SyncConfig
 from everspring_mcp.sync.orchestrator import SyncOrchestrator
 from everspring_mcp.sync.s3_sync import S3SyncService
-from everspring_mcp.storage.repository import StorageManager
 from everspring_mcp.vector.chroma_client import ChromaClient
 from everspring_mcp.vector.config import VectorConfig
 from everspring_mcp.vector.embeddings import Embedder
 from everspring_mcp.vector.indexer import VectorIndexer
 from everspring_mcp.vector.retriever import HybridRetriever
+
+
+logger = logging.getLogger("everspring_mcp")
 
 
 def _parse_module(value: str) -> SpringModule:
@@ -118,14 +121,24 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     sync.add_argument(
         "--mode",
-        choices=["manifest", "snapshot-upload"],
+        choices=["manifest", "manifest-prime", "snapshot-upload", "snapshot-download"],
         default="manifest",
-        help="Sync mode (manifest downloads raw docs; snapshot-upload backs up local SQLite+Chroma)",
+        help=(
+            "Sync mode (manifest downloads raw docs; manifest-prime pre-generates/uploads "
+            "manifest.json files; snapshot-upload backs up local SQLite+Chroma; "
+            "snapshot-download restores latest matching SQLite+Chroma snapshots)"
+        ),
     )
     sync.add_argument(
         "--force",
         action="store_true",
-        help="Force sync even if manifest unchanged (manifest mode only)",
+        help="Force operation in manifest/manifest-prime modes",
+    )
+    sync.add_argument(
+        "--parallel-jobs",
+        type=int,
+        default=5,
+        help="Parallel workers for manifest download/priming",
     )
     sync.add_argument("--s3-bucket", default=None, help="S3 bucket override")
     sync.add_argument("--s3-region", default=None, help="S3 region override")
@@ -164,7 +177,24 @@ def _build_parser() -> argparse.ArgumentParser:
     index.add_argument("--max-tokens", type=int, default=None, help="Max tokens per chunk override")
     index.add_argument("--overlap-tokens", type=int, default=None, help="Token overlap override")
     index.add_argument("--batch-size", type=int, default=None, help="Embedding batch size override")
+    index.add_argument(
+        "--chunk-workers",
+        type=int,
+        default=None,
+        help="Parallel workers for document chunk preparation override",
+    )
+    index.add_argument(
+        "--upsert-batch-size",
+        type=int,
+        default=None,
+        help="Chroma upsert batch size override",
+    )
     index.add_argument("--reindex", action="store_true", help="Reset indexed flags and rebuild vectors")
+    index.add_argument(
+        "--build-bm25",
+        action="store_true",
+        help="Build BM25 index after vector indexing",
+    )
     index.add_argument("--module", default=None, help="Module filter for --reindex (e.g., spring-boot)")
     index.add_argument("--version", type=int, default=None, help="Major version filter for --reindex")
     index.add_argument("--submodule", default=None, help="Submodule filter for --reindex")
@@ -326,14 +356,14 @@ async def _run_scrape(args: argparse.Namespace) -> int:
         },
     }
     if args.json:
-        print(json.dumps(summary, indent=2))
+        logger.info(json.dumps(summary, indent=2))
     else:
-        print(
+        logger.info(
             f"Discovery: {summary['discovery']['links']} links "
             f"(duplicates: {summary['discovery']['duplicates']}, "
             f"filtered: {summary['discovery']['filtered']})"
         )
-        print(
+        logger.info(
             f"Scrape results: {summary['results']['success']} success, "
             f"{summary['results']['skipped']} skipped, {summary['results']['failed']} failed"
         )
@@ -392,18 +422,18 @@ async def _run_manifest_sync(args: argparse.Namespace, config: SyncConfig) -> in
                 "errors": [f"{r.module}:{r.version} -> {err}" for r in results for err in r.errors],
             }
             if args.json:
-                print(json.dumps(summary, indent=2))
+                logger.info(json.dumps(summary, indent=2))
             else:
-                print(
+                logger.info(
                     f"Sync-all (manifest): {summary['completed']}/{summary['targets']} completed, "
                     f"{summary['failed']} failed "
                     f"(+{summary['files_added']} ~{summary['files_modified']} -{summary['files_removed']}, "
                     f"{summary['bytes_downloaded']} bytes)"
                 )
                 if summary["errors"]:
-                    print("Errors:")
+                    logger.info("Errors:")
                     for err in summary["errors"]:
-                        print(f"- {err}")
+                        logger.info(f"- {err}")
             return 0 if summary["failed"] == 0 else 1
 
         result = await orchestrator.sync_module(
@@ -414,22 +444,82 @@ async def _run_manifest_sync(args: argparse.Namespace, config: SyncConfig) -> in
         )
 
     if args.json:
-        print(result.model_dump_json(indent=2))
+        logger.info(result.model_dump_json(indent=2))
     else:
-        print(
+        logger.info(
             f"Sync status (manifest): {result.status.value} "
             f"(+{result.files_added} ~{result.files_modified} -{result.files_removed}, "
             f"{result.bytes_downloaded} bytes)"
         )
         if result.errors:
-            print("Errors:")
+            logger.info("Errors:")
             for err in result.errors:
-                print(f"- {err}")
+                logger.info(f"- {err}")
     return 0 if result.status.value == "completed" else 1
+
+
+async def _run_manifest_prime(args: argparse.Namespace, config: SyncConfig) -> int:
+    """Generate/upload remote manifest.json files without downloading docs."""
+    s3_service = S3SyncService(config)
+    parallel_jobs = config.parallel_jobs
+
+    if args.all:
+        targets = _load_sync_targets_from_matrix(Path("config") / "module_submodule_urls.csv")
+    else:
+        targets = [(args.module, args.version, args.submodule)]
+
+    semaphore = asyncio.Semaphore(parallel_jobs)
+
+    async def _prime_target(module: str, version: str, submodule: str | None):
+        async with semaphore:
+            return await s3_service.ensure_manifest(
+                module=module,
+                version=version,
+                submodule=submodule,
+                force=args.force,
+            )
+
+    tasks = [
+        _prime_target(module, version, submodule)
+        for module, version, submodule in targets
+    ]
+    results = await asyncio.gather(*tasks)
+
+    summary = {
+        "mode": "manifest-prime",
+        "parallel_jobs": parallel_jobs,
+        "targets": len(results),
+        "uploaded": sum(1 for r in results if r.status == "uploaded"),
+        "skipped": sum(1 for r in results if r.status == "skipped"),
+        "failed": sum(1 for r in results if r.status == "failed"),
+        "files_covered": sum(r.file_count for r in results if r.status != "failed"),
+        "total_size_bytes": sum(r.total_size_bytes for r in results if r.status != "failed"),
+        "results": [r.model_dump() for r in results],
+        "errors": [
+            f"{r.module}:{r.version}{'/' + r.submodule if r.submodule else ''} -> {r.error}"
+            for r in results
+            if r.status == "failed" and r.error
+        ],
+    }
+
+    if args.json:
+        logger.info(json.dumps(summary, indent=2, default=str))
+    else:
+        logger.info(
+            f"Manifest prime: {summary['uploaded']} uploaded, {summary['skipped']} skipped, "
+            f"{summary['failed']} failed ({summary['files_covered']} files)"
+        )
+        if summary["errors"]:
+            logger.info("Errors:")
+            for err in summary["errors"]:
+                logger.info(f"- {err}")
+    return 0 if summary["failed"] == 0 else 1
 
 
 async def _run_sync(args: argparse.Namespace) -> int:
     config = SyncConfig.from_env()
+    if args.parallel_jobs < 1:
+        raise SystemExit("--parallel-jobs must be >= 1")
     updates: dict[str, Any] = {}
     if args.s3_bucket:
         updates["s3_bucket"] = args.s3_bucket
@@ -439,54 +529,87 @@ async def _run_sync(args: argparse.Namespace) -> int:
         updates["s3_prefix"] = args.s3_prefix
     if args.data_dir:
         updates["local_data_dir"] = args.data_dir
+    if args.mode in {"manifest", "manifest-prime"}:
+        updates["parallel_jobs"] = args.parallel_jobs
+        updates["download_concurrency"] = args.parallel_jobs
     if updates:
         config = config.model_copy(update=updates)
 
-    if args.mode == "snapshot-upload":
+    if args.mode in {"snapshot-upload", "snapshot-download"}:
         if args.force:
-            raise SystemExit("--force is only supported with --mode manifest")
+            raise SystemExit("--force is only supported with --mode manifest or --mode manifest-prime")
         if any([args.all, args.module, args.version, args.submodule]):
             raise SystemExit(
-                "--mode snapshot-upload does not accept --all/--module/--version/--submodule"
+                f"--mode {args.mode} does not accept --all/--module/--version/--submodule"
             )
 
-        s3_service = S3SyncService(config)
-        snapshot_results = await s3_service.upload_db_snapshots()
+        if args.mode == "snapshot-upload":
+            s3_service = S3SyncService(config)
+            snapshot_results = await s3_service.upload_db_snapshots()
+
+            summary = {
+                "mode": args.mode,
+                "snapshots": len(snapshot_results),
+                "completed": sum(1 for r in snapshot_results if r.success),
+                "failed": sum(1 for r in snapshot_results if not r.success),
+                "bytes_uploaded": sum(r.size_bytes for r in snapshot_results if r.success),
+                "results": [
+                    {
+                        "snapshot_name": r.snapshot_name,
+                        "s3_key": r.s3_key,
+                        "size_bytes": r.size_bytes,
+                        "content_hash": r.content_hash,
+                        "success": r.success,
+                        "error": r.error,
+                    }
+                    for r in snapshot_results
+                ],
+                "errors": [f"{r.snapshot_name} -> {r.error}" for r in snapshot_results if not r.success and r.error],
+            }
+
+            if args.json:
+                logger.info(json.dumps(summary, indent=2))
+            else:
+                status = "completed" if summary["failed"] == 0 else "failed"
+                logger.info(
+                    f"Sync status ({args.mode}): {status} "
+                    f"({summary['completed']}/{summary['snapshots']} uploaded, "
+                    f"{summary['bytes_uploaded']} bytes)"
+                )
+                if summary["errors"]:
+                    logger.info("Errors:")
+                    for err in summary["errors"]:
+                        logger.info(f"- {err}")
+            return 0 if summary["failed"] == 0 else 1
+
+        async with SyncOrchestrator(config) as orchestrator:
+            snapshot_result = await orchestrator.download_latest_snapshots()
 
         summary = {
             "mode": args.mode,
-            "snapshots": len(snapshot_results),
-            "completed": sum(1 for r in snapshot_results if r.success),
-            "failed": sum(1 for r in snapshot_results if not r.success),
-            "bytes_uploaded": sum(r.size_bytes for r in snapshot_results if r.success),
-            "results": [
-                {
-                    "snapshot_name": r.snapshot_name,
-                    "s3_key": r.s3_key,
-                    "size_bytes": r.size_bytes,
-                    "content_hash": r.content_hash,
-                    "success": r.success,
-                    "error": r.error,
-                }
-                for r in snapshot_results
-            ],
-            "errors": [f"{r.snapshot_name} -> {r.error}" for r in snapshot_results if not r.success and r.error],
+            "snapshot_token": snapshot_result.snapshot_token,
+            "chroma_snapshot": snapshot_result.chroma_snapshot,
+            "sqlite_snapshot": snapshot_result.sqlite_snapshot,
+            "bytes_downloaded": snapshot_result.bytes_downloaded,
+            "success": snapshot_result.success,
+            "error": snapshot_result.error,
         }
 
         if args.json:
-            print(json.dumps(summary, indent=2))
+            logger.info(json.dumps(summary, indent=2))
         else:
-            status = "completed" if summary["failed"] == 0 else "failed"
-            print(
-                f"Sync status ({args.mode}): {status} "
-                f"({summary['completed']}/{summary['snapshots']} uploaded, "
-                f"{summary['bytes_uploaded']} bytes)"
-            )
-            if summary["errors"]:
-                print("Errors:")
-                for err in summary["errors"]:
-                    print(f"- {err}")
-        return 0 if summary["failed"] == 0 else 1
+            if snapshot_result.success:
+                downloaded_mb = snapshot_result.bytes_downloaded / (1024 * 1024)
+                logger.info(
+                    f"Sync complete. {downloaded_mb:.1f}MB downloaded. "
+                    "Vector DB is now live and ready for search."
+                )
+            else:
+                logger.info(
+                    f"Sync status ({args.mode}): failed "
+                    f"({snapshot_result.error or 'unknown error'})"
+                )
+        return 0 if snapshot_result.success else 1
 
     if args.all and any([args.module, args.version, args.submodule]):
         raise SystemExit("--all cannot be combined with --module/--version/--submodule")
@@ -494,6 +617,9 @@ async def _run_sync(args: argparse.Namespace) -> int:
         raise SystemExit("--submodule requires --module")
     if not args.all and (not args.module or not args.version):
         raise SystemExit("sync requires --module and --version, or use --all")
+
+    if args.mode == "manifest-prime":
+        return await _run_manifest_prime(args, config)
 
     return await _run_manifest_sync(args, config)
 
@@ -523,7 +649,7 @@ async def _run_status(args: argparse.Namespace) -> int:
                     submodule=submodule,  # type: ignore[arg-type]
                 )
                 statuses.append(status)
-            print(json.dumps(statuses, indent=2))
+            logger.info(json.dumps(statuses, indent=2))
             return 0
 
         status = await orchestrator.get_sync_status(
@@ -532,7 +658,7 @@ async def _run_status(args: argparse.Namespace) -> int:
             submodule=args.submodule,
         )
 
-    print(json.dumps(status, indent=2))
+    logger.info(json.dumps(status, indent=2))
     return 0
 
 
@@ -560,6 +686,10 @@ async def _run_index(args: argparse.Namespace) -> int:
         updates["overlap_tokens"] = args.overlap_tokens
     if args.batch_size is not None:
         updates["batch_size"] = args.batch_size
+    if args.chunk_workers is not None:
+        updates["chunk_workers"] = args.chunk_workers
+    if args.upsert_batch_size is not None:
+        updates["chroma_upsert_batch_size"] = args.upsert_batch_size
     if updates:
         config = config.model_copy(update=updates)
 
@@ -612,30 +742,39 @@ async def _run_index(args: argparse.Namespace) -> int:
     async with VectorIndexer(config=config) as indexer:
         stats = await indexer.index_unindexed(limit=args.limit)
 
+    bm25_index_built = False
+    if args.build_bm25:
+        retriever = HybridRetriever(config=config)
+        retriever.build_bm25_index()
+        bm25_index_built = True
+
     payload = {
         "documents_indexed": stats.documents_indexed,
         "chunks_indexed": stats.chunks_indexed,
         "documents_reset": reset_count,
         "vectors_deleted": deleted_vectors,
+        "bm25_index_built": bm25_index_built,
+        "bm25_index_path": str(config.data_dir / "bm25_index.pkl") if bm25_index_built else None,
     }
     if args.json:
-        print(json.dumps(payload, indent=2))
+        logger.info(json.dumps(payload, indent=2))
     else:
-        print(
+        message = (
             f"Indexed {payload['documents_indexed']} documents "
             f"({payload['chunks_indexed']} chunks)"
         )
+        if bm25_index_built:
+            message = f"{message}; BM25 index built"
+        logger.info(message)
     return 0
 
 
 async def _run_serve(args: argparse.Namespace) -> int:
     """Run MCP server."""
     from everspring_mcp.mcp.server import create_server
-    
-    logger = logging.getLogger(__name__)
-    
+
     server = create_server()
-    
+
     if args.json:
         # Output status and continue
         status_info = {
@@ -643,29 +782,30 @@ async def _run_serve(args: argparse.Namespace) -> int:
             "transport": args.transport,
             "name": server.name,
         }
-        print(json.dumps(status_info, indent=2), file=sys.stderr)
+        logger.info(json.dumps(status_info, indent=2))
     else:
-        print(f"Starting {server.name} MCP server...", file=sys.stderr)
-    
-    # Initialize and run
-    await server.initialize()
-    server.run(transport=args.transport)
-    
+        logger.info(f"Starting {server.name} MCP server...")
+
+    if args.transport != "stdio":
+        raise SystemExit(f"Unsupported transport: {args.transport}")
+
+    await server.serve_stdio()
+
     return 0
 
 
 async def _run_client(args: argparse.Namespace) -> int:
     """Run interactive client."""
-    from everspring_mcp.mcp.client import MCPClient
+    from everspring_mcp.mcp.terminal_search import LocalSearchCLI
     
     show_progress = not getattr(args, 'no_progress', False)
-    client = MCPClient(show_progress=show_progress)
+    client = LocalSearchCLI(show_progress=show_progress)
     
-    print("EverSpring MCP - Spring Documentation Search")
-    print("=" * 50)
-    print("Commands: 'status', 'modules', 'quit', or enter a search query")
-    print("Syntax: query [module=X] [version=N] [submodule=X]")
-    print()
+    logger.info("EverSpring MCP - Spring Documentation Search")
+    logger.info("=" * 50)
+    logger.info("Commands: 'status', 'modules', 'quit', or enter a search query")
+    logger.info("Syntax: query [module=X] [version=N] [submodule=X]")
+    logger.info("")
     
     await client.initialize()
     
@@ -673,26 +813,26 @@ async def _run_client(args: argparse.Namespace) -> int:
         try:
             user_input = input("\n> ").strip()
         except (EOFError, KeyboardInterrupt):
-            print("\nGoodbye!")
+            logger.info("\nGoodbye!")
             break
         
         if not user_input:
             continue
         
         if user_input.lower() == "quit":
-            print("Goodbye!")
+            logger.info("Goodbye!")
             break
         
         if user_input.lower() == "status":
             status = await client.get_status()
-            print(client.format_status(status))
+            logger.info(client.format_status(status))
             continue
         
         if user_input.lower() == "modules":
             modules = await client.list_modules()
-            print("Available modules:")
+            logger.info("Available modules:")
             for mod in modules:
-                print(f"  - {mod}")
+                logger.info(f"  - {mod}")
             continue
         
         # Parse search query with optional filters
@@ -709,7 +849,7 @@ async def _run_client(args: argparse.Namespace) -> int:
                 try:
                     version = int(part.split("=", 1)[1])
                 except ValueError:
-                    print(f"Invalid version: {part}")
+                    logger.info(f"Invalid version: {part}")
                     continue
             elif part.startswith("submodule="):
                 submodule = part.split("=", 1)[1]
@@ -718,7 +858,7 @@ async def _run_client(args: argparse.Namespace) -> int:
         
         query = " ".join(query_parts)
         if not query:
-            print("Please provide a search query")
+            logger.info("Please provide a search query")
             continue
         
         # Run search
@@ -729,8 +869,8 @@ async def _run_client(args: argparse.Namespace) -> int:
             submodule=submodule,
         )
         
-        print()
-        print(client.format_results(response))
+        logger.info("")
+        logger.info(client.format_results(response))
     
     return 0
 
@@ -742,7 +882,7 @@ async def _run_search(args: argparse.Namespace) -> int:
     
     # Build BM25 index if requested or not exists
     if args.build_index or not retriever.ensure_bm25_index():
-        print("Building BM25 index...", file=sys.stderr)
+        logger.info("Building BM25 index...")
         retriever.build_bm25_index()
     
     # Run search
@@ -769,20 +909,20 @@ async def _run_search(args: argparse.Namespace) -> int:
             }
             for r in results
         ]
-        print(json.dumps(output, indent=2))
+        logger.info(json.dumps(output, indent=2))
     else:
         if not results:
-            print("No results found.")
+            logger.info("No results found.")
             return 0
         
         for i, r in enumerate(results, 1):
-            print(f"\n{'='*60}")
-            print(f"[{i}] {r.title}")
-            print(f"    URL: {r.url}")
-            print(f"    Module: {r.module} v{r.version_major}.{r.version_minor}")
-            print(f"    Score: {r.score:.4f} (dense: #{r.dense_rank}, sparse: #{r.sparse_rank})")
-            print(f"{'='*60}")
-            print(r.content)
+            logger.info(f"\n{'='*60}")
+            logger.info(f"[{i}] {r.title}")
+            logger.info(f"    URL: {r.url}")
+            logger.info(f"    Module: {r.module} v{r.version_major}.{r.version_minor}")
+            logger.info(f"    Score: {r.score:.4f} (dense: #{r.dense_rank}, sparse: #{r.sparse_rank})")
+            logger.info(f"{'='*60}")
+            logger.info(r.content)
     
     return 0
 
@@ -823,9 +963,9 @@ async def _run_model_cache(args: argparse.Namespace) -> int:
     )
 
     if args.json:
-        print(json.dumps(payload, indent=2))
+        logger.info(json.dumps(payload, indent=2))
     else:
-        print(
+        logger.info(
             f"Model cache ready for {payload['embedding_model']} "
             f"in {payload['elapsed_seconds']:.2f}s"
         )

@@ -15,9 +15,9 @@ from enum import Enum
 from pydantic import Field, computed_field, model_validator
 from typing import Self
 
-from .base import SHA256Hash, TimestampedModel, VersionedModel, compute_hash
-from .metadata import DocumentMetadata
-from .spring import SpringModule, SpringVersion
+from everspring_mcp.models.base import SHA256Hash, TimestampedModel, VersionedModel, compute_hash
+from everspring_mcp.models.metadata import DocumentMetadata
+from everspring_mcp.models.spring import SpringModule, SpringVersion
 
 
 class SyncStatus(str, Enum):
