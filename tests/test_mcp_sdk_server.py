@@ -62,6 +62,8 @@ async def test_execute_search_tool_formats_markdown() -> None:
         assert "Authorize HttpServletRequests" in text
         retriever.search.assert_awaited_once_with(
             query="multiple securityfilterchain beans",
+            # top_k=15 because the tool fetches top_k * 5 candidates before score filtering
+            # (configured top_k=3, so fetch_k = 3 * 5 = 15).
             top_k=15,
             module=None,
             version_major=None,

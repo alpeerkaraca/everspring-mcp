@@ -1204,17 +1204,19 @@ class S3SyncService:
         except (ClientError, BotoCoreError, ValueError, RuntimeError) as e:
             # Sanitize AWS error details to avoid leaking ARNs, bucket names, etc.
             if isinstance(e, ClientError):
-                error_msg = f"S3 error: {e.response.get('Error', {}).get('Code', 'Unknown')}"
+                code = e.response.get("Error", {}).get("Code", "Unknown")
+                error_msg = f"S3 error: {code}"
             elif isinstance(e, BotoCoreError):
                 error_msg = f"AWS service error: {type(e).__name__}"
             else:
                 error_msg = f"{type(e).__name__}: {e}"
+            # Log the full error for operator debugging (goes to server logs, not client).
             logger.warning(
                 "Failed to ensure manifest for %s/%s%s: %s",
                 module,
                 version,
                 f" ({submodule})" if submodule else "",
-                error_msg,
+                e,
             )
             return ManifestBuildResult(
                 module=module,

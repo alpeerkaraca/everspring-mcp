@@ -103,7 +103,7 @@ class BM25Index:
             pickle.dump(data, f)
 
         # Write companion SHA-256 file for integrity verification on load.
-        digest = hashlib.sha256(self.index_path.read_bytes()).hexdigest()
+        digest = self._hash_file(self.index_path)
         self.hash_path.write_text(digest, encoding="utf-8")
         logger.info(f"BM25 index saved to {self.index_path}")
     
@@ -124,7 +124,7 @@ class BM25Index:
         # Verify integrity when a companion hash file is present.
         if self.hash_path.exists():
             expected_digest = self.hash_path.read_text(encoding="utf-8").strip()
-            actual_digest = hashlib.sha256(self.index_path.read_bytes()).hexdigest()
+            actual_digest = self._hash_file(self.index_path)
             if actual_digest != expected_digest:
                 raise ValueError(
                     f"BM25 index integrity check failed for {self.index_path}. "
@@ -198,6 +198,15 @@ class BM25Index:
         
         return results
     
+    @staticmethod
+    def _hash_file(file_path: Path) -> str:
+        """Compute SHA-256 digest of a file using streaming reads to limit memory use."""
+        digest = hashlib.sha256()
+        with open(file_path, "rb") as f:
+            for chunk in iter(lambda: f.read(65536), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
     @staticmethod
     def _tokenize(text: str) -> list[str]:
         """Tokenize text for BM25.

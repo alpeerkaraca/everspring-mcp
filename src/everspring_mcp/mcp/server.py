@@ -310,10 +310,11 @@ class MCPServer:
 
             if response.status == SearchStatus.ERROR:
                 # Avoid leaking internal error details from the tool layer.
+                # response.message already contains only the exception type name.
                 return self._error_result(
                     "Search is currently unavailable because local retrieval data is missing "
                     "or not readable.\n\n"
-                    f"**Error:** `{response.message.removeprefix('Search failed: ')}`\n\n"
+                    f"**Error:** `{response.message}`\n\n"
                     "Run local sync/index flows (including BM25 build) and retry."
                 )
             lines = [
