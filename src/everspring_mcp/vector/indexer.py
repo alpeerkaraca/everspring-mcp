@@ -251,6 +251,11 @@ class VectorIndexer:
         if self._is_metadata_path(relative_path):
             return None
 
+        # Defense-in-depth: reject path traversal components from stored file_path.
+        if relative_path.is_absolute() or ".." in relative_path.parts:
+            logger.warning("Skipping document with unsafe file_path: %s", doc.file_path)
+            return None
+
         markdown_path = self.config.docs_dir / relative_path
         if not markdown_path.exists():
             return None

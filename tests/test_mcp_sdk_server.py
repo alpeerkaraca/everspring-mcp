@@ -20,8 +20,13 @@ def _extract_text(result) -> str:
 
 @pytest.mark.asyncio
 async def test_execute_search_tool_formats_markdown() -> None:
-    with patch("everspring_mcp.mcp.server.HybridRetriever") as mock_retriever:
-        retriever = mock_retriever.return_value
+    with (
+        patch("everspring_mcp.mcp.server.HybridRetriever") as mock_server_retriever,
+        patch("everspring_mcp.mcp.tools.HybridRetriever") as mock_tool_retriever,
+        patch("everspring_mcp.mcp.tools.ChromaClient"),
+    ):
+        retriever = mock_server_retriever.return_value
+        mock_tool_retriever.return_value = retriever
         retriever._embedder.prefetch_model = AsyncMock(return_value=None)
         retriever.ensure_bm25_index.return_value = True
         retriever.search = AsyncMock(
@@ -52,20 +57,28 @@ async def test_execute_search_tool_formats_markdown() -> None:
         assert result.isError is False
         text = _extract_text(result)
         assert "## Spring Docs Search Results" in text
-        assert "Spring Security Servlet Authorization" in text
-        assert "**Module:** spring-security" in text
+        assert "spring-security" in text
+        assert "Use multiple @Bean methods with requestMatchers." in text
+        assert "Authorize HttpServletRequests" in text
         retriever.search.assert_awaited_once_with(
             query="multiple securityfilterchain beans",
-            top_k=3,
+            top_k=15,
             module=None,
             version_major=None,
+            fetch_k=15,
+            deduplicate_urls=True,
         )
 
 
 @pytest.mark.asyncio
 async def test_execute_search_tool_returns_graceful_error() -> None:
-    with patch("everspring_mcp.mcp.server.HybridRetriever") as mock_retriever:
-        retriever = mock_retriever.return_value
+    with (
+        patch("everspring_mcp.mcp.server.HybridRetriever") as mock_server_retriever,
+        patch("everspring_mcp.mcp.tools.HybridRetriever") as mock_tool_retriever,
+        patch("everspring_mcp.mcp.tools.ChromaClient"),
+    ):
+        retriever = mock_server_retriever.return_value
+        mock_tool_retriever.return_value = retriever
         retriever._embedder.prefetch_model = AsyncMock(return_value=None)
         retriever.ensure_bm25_index.return_value = True
         retriever.search = AsyncMock(side_effect=RuntimeError("Chroma index missing"))
@@ -79,6 +92,8 @@ async def test_execute_search_tool_returns_graceful_error() -> None:
         text = _extract_text(result)
         assert "Search is currently unavailable" in text
         assert "RuntimeError" in text
+        # Full exception message must not be exposed to the client
+        assert "Chroma index missing" not in text
 
 
 @pytest.mark.asyncio

@@ -274,7 +274,7 @@ class MCPServer:
         return (
             "Search is currently unavailable because local retrieval data is missing "
             "or not readable.\n\n"
-            f"**Error:** `{type(error).__name__}: {error}`\n\n"
+            f"**Error:** `{type(error).__name__}`\n\n"
             "Run local sync/index flows (including BM25 build) and retry."
         )
 
@@ -298,7 +298,7 @@ class MCPServer:
                 self._format_runtime_error(self._runtime.preheat_error),
             )
 
-        retriever = self._ensure_retriever()
+        self._ensure_retriever()
         try:
             search_params = SearchParameters(
                 query=params.query,
@@ -309,9 +309,15 @@ class MCPServer:
             response = await self._tool.search(search_params)
 
             if response.status == SearchStatus.ERROR:
-                return self._error_result(response.message)
+                # Avoid leaking internal error details from the tool layer.
+                return self._error_result(
+                    "Search is currently unavailable because local retrieval data is missing "
+                    "or not readable.\n\n"
+                    f"**Error:** `{response.message.removeprefix('Search failed: ')}`\n\n"
+                    "Run local sync/index flows (including BM25 build) and retry."
+                )
             lines = [
-                f"## Spring Docs Search Results",
+                "## Spring Docs Search Results",
                 f"**Status:** {response.message}",
                 "",
             ]

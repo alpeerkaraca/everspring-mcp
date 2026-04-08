@@ -155,12 +155,15 @@ class SyncConfig(BaseModel):
     
     def get_local_path(self, s3_key: str) -> Path:
         """Get local file path for an S3 key.
-        
+
         Args:
             s3_key: S3 object key (e.g., "spring-docs/raw-data/spring-boot/4.0.5/abc123/document.md")
-            
+
         Returns:
             Local file path
+
+        Raises:
+            ValueError: If the S3 key contains path traversal components.
         """
         raw_prefix = f"{self.s3_prefix}/{self.raw_data_subprefix}/"
         relative_key = s3_key
@@ -168,7 +171,12 @@ class SyncConfig(BaseModel):
             relative_key = s3_key[len(raw_prefix):]
         elif s3_key.startswith(f"{self.s3_prefix}/"):
             relative_key = s3_key[len(self.s3_prefix) + 1:]
-        
+
+        # Guard against path traversal: reject absolute paths and any ".." components.
+        candidate = Path(relative_key)
+        if candidate.is_absolute() or ".." in candidate.parts:
+            raise ValueError(f"Unsafe S3 key contains path traversal: {s3_key!r}")
+
         return self.docs_dir / relative_key
 
     @staticmethod

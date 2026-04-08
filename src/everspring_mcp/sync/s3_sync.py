@@ -55,6 +55,7 @@ SNAPSHOT_NAME_PATTERN = re.compile(
     r"^(?P<kind>chroma_db|sqlite_metadata)_(?P<token>\d{4}_\d{2}_\d{2}(?:_\d{2}_\d{2}_\d{2})?)\.zip$"
 )
 BM25_INDEX_FILENAME = "bm25_index.pkl"
+BM25_HASH_FILENAME = "bm25_index.sha256"
 
 
 class _TransferProgressCallback:
@@ -285,8 +286,8 @@ class S3SyncService:
         self,
         archive_path: Path,
         destination_dir: Path,
-    ) -> tuple[Path, Path | None]:
-        """Extract sqlite snapshot archive and return staged DB/BM25 paths."""
+    ) -> tuple[Path, Path | None, Path | None]:
+        """Extract sqlite snapshot archive and return staged DB/BM25/BM25-hash paths."""
         self._extract_zip_safely(archive_path, destination_dir)
         candidates = sorted(
             p for p in destination_dir.rglob(self.config.db_filename) if p.is_file()
@@ -307,7 +308,13 @@ class S3SyncService:
                 f"SQLite snapshot archive contains multiple {BM25_INDEX_FILENAME} files: {archive_path}"
             )
         bm25_staged_path = bm25_candidates[0] if bm25_candidates else None
-        return candidates[0], bm25_staged_path
+
+        bm25_hash_candidates = sorted(
+            p for p in destination_dir.rglob(BM25_HASH_FILENAME) if p.is_file()
+        )
+        bm25_hash_staged_path = bm25_hash_candidates[0] if bm25_hash_candidates else None
+
+        return candidates[0], bm25_staged_path, bm25_hash_staged_path
 
     def _extract_chroma_snapshot(
         self, archive_path: Path, destination_dir: Path
@@ -323,18 +330,22 @@ class S3SyncService:
         sqlite_staged_path: Path,
         chroma_staged_dir: Path,
         bm25_staged_path: Path | None = None,
+        bm25_hash_staged_path: Path | None = None,
     ) -> None:
         """Atomically activate staged snapshot data with rollback protection."""
         live_db = self.config.db_path
         live_chroma = self.config.chroma_dir
         live_bm25 = self.config.local_data_dir / BM25_INDEX_FILENAME
+        live_bm25_hash = self.config.local_data_dir / BM25_HASH_FILENAME
         db_backup = live_db.with_suffix(f"{live_db.suffix}.bak")
         chroma_backup = live_chroma.parent / f"{live_chroma.name}.bak"
         bm25_backup = live_bm25.with_suffix(f"{live_bm25.suffix}.bak")
+        bm25_hash_backup = live_bm25_hash.with_suffix(f"{live_bm25_hash.suffix}.bak")
 
         self._remove_path(db_backup)
         self._remove_path(chroma_backup)
         self._remove_path(bm25_backup)
+        self._remove_path(bm25_hash_backup)
         live_db.parent.mkdir(parents=True, exist_ok=True)
         live_chroma.parent.mkdir(parents=True, exist_ok=True)
         live_bm25.parent.mkdir(parents=True, exist_ok=True)
@@ -342,7 +353,9 @@ class S3SyncService:
         db_backed_up = False
         chroma_backed_up = False
         bm25_backed_up = False
+        bm25_hash_backed_up = False
         bm25_replaced = False
+        bm25_hash_replaced = False
 
         try:
             if live_db.exists():
@@ -354,12 +367,18 @@ class S3SyncService:
             if bm25_staged_path is not None and live_bm25.exists():
                 live_bm25.replace(bm25_backup)
                 bm25_backed_up = True
+            if bm25_hash_staged_path is not None and live_bm25_hash.exists():
+                live_bm25_hash.replace(bm25_hash_backup)
+                bm25_hash_backed_up = True
 
             sqlite_staged_path.replace(live_db)
             shutil.move(str(chroma_staged_dir), str(live_chroma))
             if bm25_staged_path is not None:
                 bm25_staged_path.replace(live_bm25)
                 bm25_replaced = True
+            if bm25_hash_staged_path is not None:
+                bm25_hash_staged_path.replace(live_bm25_hash)
+                bm25_hash_replaced = True
 
         except Exception:
             # Remove partially activated new data before restoring backups.
@@ -367,17 +386,22 @@ class S3SyncService:
             self._remove_path(live_chroma)
             if bm25_replaced:
                 self._remove_path(live_bm25)
+            if bm25_hash_replaced:
+                self._remove_path(live_bm25_hash)
             if db_backed_up and db_backup.exists():
                 db_backup.replace(live_db)
             if chroma_backed_up and chroma_backup.exists():
                 shutil.move(str(chroma_backup), str(live_chroma))
             if bm25_backed_up and bm25_backup.exists():
                 bm25_backup.replace(live_bm25)
+            if bm25_hash_backed_up and bm25_hash_backup.exists():
+                bm25_hash_backup.replace(live_bm25_hash)
             raise
         else:
             self._remove_path(db_backup)
             self._remove_path(chroma_backup)
             self._remove_path(bm25_backup)
+            self._remove_path(bm25_hash_backup)
 
     def _create_knowledge_pack_archive(self, archive_path: Path) -> tuple[int, str]:
         """Create a zipped knowledge pack from local SQLite + ChromaDB persistence."""
@@ -417,6 +441,7 @@ class S3SyncService:
         """Create a SQLite snapshot zip archive."""
         db_path = self.config.db_path
         bm25_path = self.config.local_data_dir / BM25_INDEX_FILENAME
+        bm25_hash_path = self.config.local_data_dir / BM25_HASH_FILENAME
         if not db_path.exists():
             raise FileNotFoundError(f"SQLite database not found: {db_path}")
 
@@ -429,6 +454,9 @@ class S3SyncService:
             bundle.write(db_path, arcname=self.config.db_filename)
             if bm25_path.exists() and bm25_path.is_file():
                 bundle.write(bm25_path, arcname=BM25_INDEX_FILENAME)
+                # Include companion integrity file when present.
+                if bm25_hash_path.exists() and bm25_hash_path.is_file():
+                    bundle.write(bm25_hash_path, arcname=BM25_HASH_FILENAME)
 
         archive_hash = self._compute_file_hash(archive_path)
         archive_size = archive_path.stat().st_size
@@ -791,7 +819,7 @@ class S3SyncService:
             sqlite_staging_dir = staging_root / "sqlite"
             chroma_staging_dir = staging_root / "chroma"
 
-            sqlite_staged_path, bm25_staged_path = await asyncio.to_thread(
+            sqlite_staged_path, bm25_staged_path, bm25_hash_staged_path = await asyncio.to_thread(
                 self._extract_sqlite_snapshot,
                 sqlite_archive,
                 sqlite_staging_dir,
@@ -806,6 +834,7 @@ class S3SyncService:
                 sqlite_staged_path,
                 chroma_staging_dir,
                 bm25_staged_path,
+                bm25_hash_staged_path,
             )
             activation_success = True
 
@@ -1173,12 +1202,19 @@ class S3SyncService:
             )
 
         except (ClientError, BotoCoreError, ValueError, RuntimeError) as e:
+            # Sanitize AWS error details to avoid leaking ARNs, bucket names, etc.
+            if isinstance(e, ClientError):
+                error_msg = f"S3 error: {e.response.get('Error', {}).get('Code', 'Unknown')}"
+            elif isinstance(e, BotoCoreError):
+                error_msg = f"AWS service error: {type(e).__name__}"
+            else:
+                error_msg = f"{type(e).__name__}: {e}"
             logger.warning(
                 "Failed to ensure manifest for %s/%s%s: %s",
                 module,
                 version,
                 f" ({submodule})" if submodule else "",
-                e,
+                error_msg,
             )
             return ManifestBuildResult(
                 module=module,
@@ -1186,7 +1222,7 @@ class S3SyncService:
                 submodule=submodule,
                 manifest_key=manifest_key,
                 status="failed",
-                error=str(e),
+                error=error_msg,
             )
 
     @retry(

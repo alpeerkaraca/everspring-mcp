@@ -142,12 +142,12 @@ class SpringDocsTool:
             return True
 
         except Exception as e:
-            logger.error(f"Failed to initialize search tool: {e}")
+            logger.error(f"Failed to initialize search tool: {type(e).__name__}", exc_info=True)
             self._notify_progress(
                 self.STAGE_INIT,
-                f"Initialization failed: {e}",
+                "Initialization failed. Check server logs for details.",
                 0.0,
-                error=str(e),
+                error=type(e).__name__,
             )
             return False
 
@@ -299,10 +299,10 @@ class SpringDocsTool:
             )
 
         except Exception as e:
-            logger.error(f"Search failed: {e}", exc_info=True)
+            logger.error(f"Search failed: {type(e).__name__}", exc_info=True)
             return SearchResponse(
                 status=SearchStatus.ERROR,
-                message=f"Search failed: {e}",
+                message=f"Search failed: {type(e).__name__}",
                 query=params.query,
                 results_found=0,
                 results_returned=0,

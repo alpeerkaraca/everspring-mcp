@@ -6,6 +6,7 @@ dense vector search in the hybrid retrieval pipeline.
 
 from __future__ import annotations
 
+import hashlib
 import pickle
 import re
 import time
@@ -50,6 +51,11 @@ class BM25Index:
     def index_path(self) -> Path:
         """Path to persisted BM25 index."""
         return self.config.data_dir / "bm25_index.pkl"
+
+    @property
+    def hash_path(self) -> Path:
+        """Path to SHA-256 integrity file for the persisted BM25 index."""
+        return self.index_path.with_suffix(".sha256")
     
     @property
     def is_loaded(self) -> bool:
@@ -81,36 +87,59 @@ class BM25Index:
         logger.info(f"BM25 index built in {time.perf_counter() - start:.2f}s")
     
     def save(self) -> None:
-        """Persist index to disk."""
+        """Persist index to disk with SHA-256 integrity file."""
         if not self._index:
             raise RuntimeError("No index to save")
-        
+
         data = {
             "doc_ids": self._doc_ids,
             "documents": self._documents,
             "metadatas": self._metadatas,
             "tokenized": [self._tokenize(doc) for doc in self._documents],
         }
-        
+
         self.config.data_dir.mkdir(parents=True, exist_ok=True)
         with open(self.index_path, "wb") as f:
             pickle.dump(data, f)
+
+        # Write companion SHA-256 file for integrity verification on load.
+        digest = hashlib.sha256(self.index_path.read_bytes()).hexdigest()
+        self.hash_path.write_text(digest, encoding="utf-8")
         logger.info(f"BM25 index saved to {self.index_path}")
     
     def load(self) -> bool:
-        """Load index from disk.
-        
+        """Load index from disk with optional SHA-256 integrity check.
+
         Returns:
             True if loaded successfully, False if no index file exists
+
+        Raises:
+            ValueError: If a companion hash file exists and the digest does not match,
+                        indicating the index file may have been tampered with.
         """
         if not self.index_path.exists():
             logger.debug("No BM25 index file found")
             return False
-        
+
+        # Verify integrity when a companion hash file is present.
+        if self.hash_path.exists():
+            expected_digest = self.hash_path.read_text(encoding="utf-8").strip()
+            actual_digest = hashlib.sha256(self.index_path.read_bytes()).hexdigest()
+            if actual_digest != expected_digest:
+                raise ValueError(
+                    f"BM25 index integrity check failed for {self.index_path}. "
+                    "The file may have been tampered with. Remove it and rebuild."
+                )
+        else:
+            logger.warning(
+                "BM25 index loaded without integrity verification (no .sha256 file found). "
+                "Rebuild the index to generate the verification file."
+            )
+
         start = time.perf_counter()
         with open(self.index_path, "rb") as f:
             data = pickle.load(f)
-        
+
         self._doc_ids = data["doc_ids"]
         self._documents = data["documents"]
         self._metadatas = data["metadatas"]
