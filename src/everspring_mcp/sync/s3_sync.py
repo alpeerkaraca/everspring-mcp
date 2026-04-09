@@ -117,6 +117,10 @@ class SnapshotTransferResult(BaseModel):
     archive_path: Path = Field(description="Local archive path")
     size_bytes: int = Field(description="Archive size")
     content_hash: str = Field(description="SHA256 hash of archive")
+    snapshot_namespace: str = Field(
+        default="bge-m3-main",
+        description="Model+tier namespace for snapshot storage",
+    )
     success: bool = Field(default=True)
     error: str | None = Field(default=None)
 
@@ -142,6 +146,10 @@ class SnapshotSelection(BaseModel):
     sqlite_key: str = Field(description="S3 key for SQLite snapshot")
     chroma_name: str = Field(description="Chroma snapshot file name")
     sqlite_name: str = Field(description="SQLite snapshot file name")
+    snapshot_namespace: str = Field(
+        default="bge-m3-main",
+        description="Model+tier namespace for snapshot storage",
+    )
     chroma_size_bytes: int = Field(default=0, ge=0)
     sqlite_size_bytes: int = Field(default=0, ge=0)
 
@@ -152,6 +160,7 @@ class SnapshotDownloadResult(BaseModel):
     snapshot_token: str | None = Field(default=None)
     chroma_snapshot: str | None = Field(default=None)
     sqlite_snapshot: str | None = Field(default=None)
+    snapshot_namespace: str = Field(default="bge-m3-main")
     bytes_downloaded: int = Field(default=0, ge=0)
     extracted_to: Path | None = Field(default=None)
     success: bool = Field(default=True)
@@ -469,12 +478,26 @@ class S3SyncService:
         self,
         snapshot_date: date | datetime | None = None,
         cleanup_local_archives: bool = False,
+        model_name: str | None = None,
+        tier: str | None = None,
     ) -> list[SnapshotTransferResult]:
         """Upload separate SQLite and ChromaDB snapshot archives to db-snapshots."""
+        effective_tier = (tier or self.config.model_tier).strip().lower()
+        effective_model_name = (model_name or self.config.model_name).strip()
+        snapshot_namespace = self.config.get_snapshot_namespace(
+            model_name=effective_model_name,
+            tier=effective_tier,
+        )
         chroma_archive = self.config.get_chroma_snapshot_local_path(snapshot_date)
         sqlite_archive = self.config.get_sqlite_snapshot_local_path(snapshot_date)
-        chroma_key = self.config.get_chroma_snapshot_key(snapshot_date)
-        sqlite_key = self.config.get_sqlite_snapshot_key(snapshot_date)
+        chroma_key = (
+            f"{self.config.s3_prefix}/{self.config.db_snapshots_subprefix}/"
+            f"{snapshot_namespace}/{Path(self.config.get_chroma_snapshot_key(snapshot_date)).name}"
+        )
+        sqlite_key = (
+            f"{self.config.s3_prefix}/{self.config.db_snapshots_subprefix}/"
+            f"{snapshot_namespace}/{Path(self.config.get_sqlite_snapshot_key(snapshot_date)).name}"
+        )
 
         jobs: list[tuple[str, Path, str, Any]] = [
             (
@@ -515,6 +538,9 @@ class S3SyncService:
                             "Metadata": {
                                 "content-hash": archive_hash,
                                 "snapshot-type": snapshot_type,
+                                "tier": effective_tier,
+                                "model-name": effective_model_name,
+                                "snapshot-namespace": snapshot_namespace,
                             },
                         },
                         Callback=transfer_callback,
@@ -540,6 +566,7 @@ class S3SyncService:
                         archive_path=archive_path,
                         size_bytes=archive_size,
                         content_hash=archive_hash,
+                        snapshot_namespace=snapshot_namespace,
                         success=True,
                     )
                 )
@@ -569,6 +596,7 @@ class S3SyncService:
                         archive_path=archive_path,
                         size_bytes=0,
                         content_hash="",
+                        snapshot_namespace=snapshot_namespace,
                         success=False,
                         error=str(e),
                     )
@@ -576,12 +604,19 @@ class S3SyncService:
 
         return results
 
-    async def _list_db_snapshot_objects(self) -> list[dict[str, Any]]:
+    async def _list_db_snapshot_objects(
+        self,
+        snapshot_namespace: str,
+        tier: str,
+    ) -> list[dict[str, Any]]:
         """List all objects under the db-snapshots prefix."""
         paginator = self._s3.get_paginator("list_objects_v2")
         objects: list[dict[str, Any]] = []
         seen_keys: set[str] = set()
-        prefixes = self._snapshot_prefix_candidates()
+        prefixes = self._snapshot_prefix_candidates(
+            snapshot_namespace=snapshot_namespace,
+            tier=tier,
+        )
         for base_prefix in prefixes:
             prefix = f"{base_prefix.rstrip('/')}/"
             async for page in self._async_paginate(
@@ -601,9 +636,22 @@ class S3SyncService:
             )
         return objects
 
-    async def find_latest_snapshot_pair(self) -> SnapshotSelection:
+    async def find_latest_snapshot_pair(
+        self,
+        model_name: str | None = None,
+        tier: str | None = None,
+    ) -> SnapshotSelection:
         """Find the latest date token that has both chroma and sqlite snapshots."""
-        objects = await self._list_db_snapshot_objects()
+        effective_tier = (tier or self.config.model_tier).strip().lower()
+        effective_model_name = (model_name or self.config.model_name).strip()
+        snapshot_namespace = self.config.get_snapshot_namespace(
+            model_name=effective_model_name,
+            tier=effective_tier,
+        )
+        objects = await self._list_db_snapshot_objects(
+            snapshot_namespace=snapshot_namespace,
+            tier=effective_tier,
+        )
         chroma_by_token: dict[str, dict[str, Any]] = {}
         sqlite_by_token: dict[str, dict[str, Any]] = {}
 
@@ -668,6 +716,7 @@ class S3SyncService:
             sqlite_key=sqlite_key,
             chroma_name=Path(chroma_key).name,
             sqlite_name=Path(sqlite_key).name,
+            snapshot_namespace=snapshot_namespace,
             chroma_size_bytes=int(chroma_obj.get("Size", 0)),
             sqlite_size_bytes=int(sqlite_obj.get("Size", 0)),
         )
@@ -679,7 +728,7 @@ class S3SyncService:
         )
         return selection
 
-    def _snapshot_prefix_candidates(self) -> list[str]:
+    def _snapshot_prefix_candidates(self, snapshot_namespace: str, tier: str) -> list[str]:
         """Build candidate snapshot prefixes, including compatibility fallbacks."""
         candidates: list[str] = []
 
@@ -688,19 +737,28 @@ class S3SyncService:
             if normalized and normalized not in candidates:
                 candidates.append(normalized)
 
-        # Primary configured location.
-        _add(self.config.get_db_snapshots_prefix())
+        tier_segment = tier.strip().lower()
+        namespace_segment = snapshot_namespace.strip().lower()
 
-        # Common canonical location used by production uploads.
-        _add(f"spring-docs/{self.config.db_snapshots_subprefix}")
+        # Primary configured location with namespace segment.
+        _add(f"{self.config.s3_prefix}/{self.config.db_snapshots_subprefix}/{namespace_segment}")
+
+        # Common canonical location used by production uploads (with namespace).
+        _add(f"spring-docs/{self.config.db_snapshots_subprefix}/{namespace_segment}")
 
         # If s3_prefix accidentally points at raw-data, recover to root prefix.
         raw_suffix = f"/{self.config.raw_data_subprefix}"
         if self.config.s3_prefix.endswith(raw_suffix):
             root_prefix = self.config.s3_prefix[: -len(raw_suffix)]
-            _add(f"{root_prefix}/{self.config.db_snapshots_subprefix}")
+            _add(f"{root_prefix}/{self.config.db_snapshots_subprefix}/{namespace_segment}")
 
-        # Legacy fallback where snapshots may exist at bucket root.
+        # Backward compatibility with legacy tier-only namespace.
+        _add(f"{self.config.s3_prefix}/{self.config.db_snapshots_subprefix}/{tier_segment}")
+        _add(f"spring-docs/{self.config.db_snapshots_subprefix}/{tier_segment}")
+
+        # Legacy fallbacks without tier segment.
+        _add(f"{self.config.s3_prefix}/{self.config.db_snapshots_subprefix}")
+        _add(f"spring-docs/{self.config.db_snapshots_subprefix}")
         _add(self.config.db_snapshots_subprefix)
         return candidates
 
@@ -757,8 +815,16 @@ class S3SyncService:
     async def download_latest_db_snapshots(
         self,
         cleanup_local_archives: bool = True,
+        model_name: str | None = None,
+        tier: str | None = None,
     ) -> SnapshotDownloadResult:
         """Download and atomically activate the latest matching db snapshot pair."""
+        effective_tier = (tier or self.config.model_tier).strip().lower()
+        effective_model_name = (model_name or self.config.model_name).strip()
+        snapshot_namespace = self.config.get_snapshot_namespace(
+            model_name=effective_model_name,
+            tier=effective_tier,
+        )
         selection: SnapshotSelection | None = None
         bytes_downloaded = 0
         chroma_archive: Path | None = None
@@ -767,7 +833,10 @@ class S3SyncService:
         activation_success = False
 
         try:
-            selection = await self.find_latest_snapshot_pair()
+            selection = await self.find_latest_snapshot_pair(
+                model_name=effective_model_name,
+                tier=effective_tier,
+            )
             chroma_archive = self.config.packs_dir / selection.chroma_name
             sqlite_archive = self.config.packs_dir / selection.sqlite_name
             chroma_archive.parent.mkdir(parents=True, exist_ok=True)
@@ -818,6 +887,7 @@ class S3SyncService:
                 snapshot_token=selection.snapshot_token,
                 chroma_snapshot=selection.chroma_name,
                 sqlite_snapshot=selection.sqlite_name,
+                snapshot_namespace=snapshot_namespace,
                 bytes_downloaded=bytes_downloaded,
                 extracted_to=self.config.local_data_dir,
                 success=True,
@@ -836,6 +906,7 @@ class S3SyncService:
                 snapshot_token=selection.snapshot_token if selection else None,
                 chroma_snapshot=selection.chroma_name if selection else None,
                 sqlite_snapshot=selection.sqlite_name if selection else None,
+                snapshot_namespace=snapshot_namespace,
                 bytes_downloaded=bytes_downloaded,
                 extracted_to=None,
                 success=False,
@@ -848,6 +919,123 @@ class S3SyncService:
                 for archive_path in (chroma_archive, sqlite_archive):
                     if archive_path and archive_path.exists():
                         await asyncio.to_thread(archive_path.unlink)
+
+    def _model_prefix_candidates(self, tier: str) -> list[str]:
+        """Build candidate model-artifact prefixes for a model tier."""
+        candidates: list[str] = []
+
+        def _add(prefix: str) -> None:
+            normalized = prefix.strip().strip("/")
+            if normalized and normalized not in candidates:
+                candidates.append(normalized)
+
+        clean_tier = tier.strip().lower()
+        _add(self.config.get_models_prefix(clean_tier))
+        _add(f"spring-docs/{self.config.models_subprefix}/{clean_tier}")
+        _add(f"{self.config.models_subprefix}/{clean_tier}")
+        return candidates
+
+    async def _download_object_to_path(
+        self,
+        s3_key: str,
+        local_path: Path,
+    ) -> DownloadResult:
+        """Download one S3 object to a custom local path with hash verification."""
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            head = await asyncio.to_thread(
+                self._s3.head_object,
+                Bucket=self.config.s3_bucket,
+                Key=s3_key,
+            )
+            expected_size = int(head.get("ContentLength", 0))
+            expected_hash = head.get("Metadata", {}).get("content-hash")
+            callback = self._create_transfer_callback(
+                description=f"Download {Path(s3_key).name}",
+                total_bytes=expected_size,
+            )
+            try:
+                await asyncio.to_thread(
+                    self._s3.download_file,
+                    self.config.s3_bucket,
+                    s3_key,
+                    str(local_path),
+                    Callback=callback,
+                )
+            finally:
+                callback.close()
+
+            size_bytes = local_path.stat().st_size
+            content_hash = await asyncio.to_thread(self._compute_file_hash, local_path)
+            if expected_size and size_bytes != expected_size:
+                raise ValueError(
+                    f"Model artifact size mismatch for {s3_key}: expected {expected_size}, got {size_bytes}"
+                )
+            if expected_hash and content_hash != expected_hash:
+                raise ValueError(
+                    f"Model artifact hash mismatch for {s3_key}: expected {expected_hash}, got {content_hash}"
+                )
+            return DownloadResult(
+                s3_key=s3_key,
+                local_path=local_path,
+                size_bytes=size_bytes,
+                content_hash=content_hash,
+                success=True,
+            )
+        except (ClientError, BotoCoreError, OSError, ValueError) as exc:
+            logger.exception("Model artifact download failed for %s", s3_key)
+            return DownloadResult(
+                s3_key=s3_key,
+                local_path=local_path,
+                size_bytes=0,
+                content_hash="",
+                success=False,
+                error=str(exc),
+            )
+
+    async def download_model_artifacts(
+        self,
+        tier: str = "slim",
+        destination_dir: Path | None = None,
+    ) -> list[DownloadResult]:
+        """Download prebuilt model artifacts for a tier into local model directory."""
+        effective_tier = tier.strip().lower()
+        target_root = destination_dir or self.config.get_local_model_dir(effective_tier)
+        target_root.mkdir(parents=True, exist_ok=True)
+
+        paginator = self._s3.get_paginator("list_objects_v2")
+        candidates = self._model_prefix_candidates(effective_tier)
+        objects: list[tuple[str, str]] = []
+        seen_keys: set[str] = set()
+        for base_prefix in candidates:
+            prefix = f"{base_prefix.rstrip('/')}/"
+            async for page in self._async_paginate(
+                paginator, self.config.s3_bucket, prefix
+            ):
+                for obj in page.get("Contents", []):
+                    key = obj.get("Key")
+                    if (
+                        not key
+                        or key.endswith("/")
+                        or key in seen_keys
+                        or not key.startswith(prefix)
+                    ):
+                        continue
+                    seen_keys.add(key)
+                    objects.append((key, prefix))
+
+        if not objects:
+            raise FileNotFoundError(
+                "No model artifacts found under prefixes: "
+                + ", ".join(f"{p.rstrip('/')}/" for p in candidates)
+            )
+
+        tasks = []
+        for s3_key, prefix in objects:
+            relative = s3_key.removeprefix(prefix).lstrip("/")
+            local_path = target_root / relative
+            tasks.append(self._download_object_to_path(s3_key=s3_key, local_path=local_path))
+        return await asyncio.gather(*tasks)
 
     def _safe_extract_archive(self, archive_path: Path, destination_dir: Path) -> None:
         """Extract archive with path traversal protection."""
@@ -1461,7 +1649,7 @@ class S3SyncService:
         ]
         gathered = await asyncio.gather(*tasks, return_exceptions=True)
         results: list[DownloadResult] = []
-        for (s3_key, _), item in zip(task_specs, gathered):
+        for (s3_key, _), item in zip(task_specs, gathered, strict=False):
             if isinstance(item, Exception):
                 logger.error("Download task failed for %s: %s", s3_key, item)
                 results.append(

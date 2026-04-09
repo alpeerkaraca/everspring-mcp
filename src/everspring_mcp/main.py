@@ -13,6 +13,8 @@ import argparse
 import asyncio
 import json
 import logging
+import os
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -26,11 +28,13 @@ from everspring_mcp.sync.config import SyncConfig
 from everspring_mcp.sync.orchestrator import SyncOrchestrator
 from everspring_mcp.sync.s3_sync import S3SyncService
 from everspring_mcp.vector.chroma_client import ChromaClient
-from everspring_mcp.vector.config import VectorConfig
-from everspring_mcp.vector.embeddings import Embedder
+from everspring_mcp.vector.config import VectorConfig, chunk_defaults_for_tier
+from everspring_mcp.vector.embeddings import (
+    Embedder,
+    default_model_for_tier,
+)
 from everspring_mcp.vector.indexer import VectorIndexer
 from everspring_mcp.vector.retriever import HybridRetriever
-
 
 logger = logging.getLogger("everspring_mcp")
 
@@ -59,6 +63,106 @@ def _parse_version(value: str, module: SpringModule) -> SpringVersion:
         return SpringVersion.parse(module, value)
     except ValueError as exc:
         raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
+def _model_slug(model_name: str) -> str:
+    model_tail = model_name.strip().split("/")[-1]
+    slug = re.sub(r"[^a-z0-9]+", "-", model_tail.lower()).strip("-")
+    return slug or "model"
+
+
+def _tier_chroma_dir(tier: str, model_name: str) -> Path:
+    return Path.home() / ".everspring" / f"chroma-{tier}-{_model_slug(model_name)}"
+
+
+def _snapshot_state_path(data_dir: Path) -> Path:
+    return data_dir / ".snapshot_state.json"
+
+
+def _load_snapshot_state(data_dir: Path) -> dict[str, str]:
+    state_path = _snapshot_state_path(data_dir)
+    if not state_path.exists():
+        return {}
+    try:
+        payload = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    state: dict[str, str] = {}
+    for key, value in payload.items():
+        if isinstance(key, str) and isinstance(value, str):
+            state[key] = value
+    return state
+
+
+def _save_snapshot_state(data_dir: Path, state: dict[str, str]) -> None:
+    state_path = _snapshot_state_path(data_dir)
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(
+        json.dumps(state, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+
+
+def _restart_current_process() -> None:
+    env = os.environ.copy()
+    env["EVERSPRING_AUTO_SNAPSHOT_RESTARTED"] = "1"
+    os.execvpe(sys.executable, [sys.executable, "-m", "everspring_mcp.main", *sys.argv[1:]], env)
+
+
+async def _auto_refresh_runtime_snapshots(
+    *,
+    model_name: str,
+    tier: str,
+    data_dir: Path,
+) -> None:
+    if os.environ.get("EVERSPRING_AUTO_SNAPSHOT_RESTARTED") == "1":
+        return
+
+    sync_config = SyncConfig.from_env().model_copy(
+        update={
+            "local_data_dir": data_dir,
+            "model_name": model_name,
+            "model_tier": tier,
+        }
+    )
+    sync_config.ensure_directories()
+    service = S3SyncService(sync_config)
+    try:
+        selection = await service.find_latest_snapshot_pair(
+            model_name=model_name,
+            tier=tier,
+        )
+    except ValueError:
+        return
+
+    namespace = sync_config.get_snapshot_namespace(model_name=model_name, tier=tier)
+    state = _load_snapshot_state(data_dir)
+    if state.get(namespace) == selection.snapshot_token:
+        return
+
+    async with SyncOrchestrator(sync_config, s3_service=service) as orchestrator:
+        download_result = await orchestrator.download_latest_snapshots(
+            model_name=model_name,
+            tier=tier,
+        )
+    if not download_result.success or not download_result.snapshot_token:
+        logger.warning(
+            "Auto snapshot refresh failed for %s: %s",
+            namespace,
+            download_result.error or "unknown error",
+        )
+        return
+
+    state[namespace] = download_result.snapshot_token
+    _save_snapshot_state(data_dir, state)
+    logger.info(
+        "Applied newer snapshot %s for %s; restarting process",
+        download_result.snapshot_token,
+        namespace,
+    )
+    _restart_current_process()
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -121,7 +225,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     sync.add_argument(
         "--mode",
-        choices=["manifest", "manifest-prime", "snapshot-upload", "snapshot-download"],
+        choices=[
+            "manifest",
+            "manifest-prime",
+            "snapshot-upload",
+            "snapshot-download",
+        ],
         default="manifest",
         help=(
             "Sync mode (manifest downloads raw docs; manifest-prime pre-generates/uploads "
@@ -143,6 +252,17 @@ def _build_parser() -> argparse.ArgumentParser:
     sync.add_argument("--s3-bucket", default=None, help="S3 bucket override")
     sync.add_argument("--s3-region", default=None, help="S3 region override")
     sync.add_argument("--s3-prefix", default=None, help="S3 key prefix override")
+    sync.add_argument(
+        "--snapshot-model",
+        default=None,
+        help="Snapshot namespace model name override for snapshot-upload/download",
+    )
+    sync.add_argument(
+        "--snapshot-tier",
+        choices=["main", "slim", "xslim"],
+        default=None,
+        help="Snapshot namespace tier override for snapshot-upload/download",
+    )
     sync.add_argument("--data-dir", default=None, help="Local data directory override")
     sync.add_argument("--json", action="store_true", help="Output JSON summary")
 
@@ -174,6 +294,12 @@ def _build_parser() -> argparse.ArgumentParser:
     index.add_argument("--chroma-dir", default=None, help="ChromaDB persistent dir override")
     index.add_argument("--collection", default=None, help="ChromaDB collection name override")
     index.add_argument("--embed-model", default=None, help="Embedding model override")
+    index.add_argument(
+        "--tier",
+        choices=["main", "slim", "xslim"],
+        default="main",
+        help="Embedding tier",
+    )
     index.add_argument("--max-tokens", type=int, default=None, help="Max tokens per chunk override")
     index.add_argument("--overlap-tokens", type=int, default=None, help="Token overlap override")
     index.add_argument("--batch-size", type=int, default=None, help="Embedding batch size override")
@@ -237,6 +363,12 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Disable URL deduplication (show multiple chunks from same page)",
     )
+    search.add_argument(
+        "--tier",
+        choices=["main", "slim", "xslim"],
+        default="main",
+        help="Embedding tier",
+    )
     search.add_argument("--json", action="store_true", help="Output JSON results")
 
     model_cache = subparsers.add_parser(
@@ -259,6 +391,12 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=["stdio"],
         help="MCP transport type",
     )
+    serve.add_argument(
+        "--tier",
+        choices=["main", "slim", "xslim"],
+        default="main",
+        help="Embedding tier",
+    )
     serve.add_argument("--json", action="store_true", help="Output JSON status on startup")
 
     # Interactive client command
@@ -279,7 +417,7 @@ def _build_parser() -> argparse.ArgumentParser:
 def _configure_logging(level: str, log_file: str | None) -> None:
     """Configure logging with file output to logs/ directory."""
     from everspring_mcp.utils.logging import setup_logging
-    
+
     # Use centralized logging - always logs to logs/ directory
     setup_logging(
         level=level,
@@ -287,7 +425,7 @@ def _configure_logging(level: str, log_file: str | None) -> None:
         file=True,  # Always log to file
         name="everspring",
     )
-    
+
     # If user specified additional log file, add it
     if log_file:
         logger = logging.getLogger("everspring_mcp")
@@ -528,7 +666,13 @@ async def _run_sync(args: argparse.Namespace) -> int:
     if args.s3_prefix:
         updates["s3_prefix"] = args.s3_prefix
     if args.data_dir:
-        updates["local_data_dir"] = args.data_dir
+        updates["local_data_dir"] = Path(args.data_dir)
+    snapshot_tier = getattr(args, "snapshot_tier", None)
+    snapshot_model = getattr(args, "snapshot_model", None)
+    if snapshot_tier:
+        updates["model_tier"] = snapshot_tier
+    if snapshot_model:
+        updates["model_name"] = snapshot_model
     if args.mode in {"manifest", "manifest-prime"}:
         updates["parallel_jobs"] = args.parallel_jobs
         updates["download_concurrency"] = args.parallel_jobs
@@ -545,10 +689,14 @@ async def _run_sync(args: argparse.Namespace) -> int:
 
         if args.mode == "snapshot-upload":
             s3_service = S3SyncService(config)
-            snapshot_results = await s3_service.upload_db_snapshots()
+            snapshot_results = await s3_service.upload_db_snapshots(
+                model_name=config.model_name,
+                tier=config.model_tier,
+            )
 
             summary = {
                 "mode": args.mode,
+                "snapshot_namespace": config.get_snapshot_namespace(),
                 "snapshots": len(snapshot_results),
                 "completed": sum(1 for r in snapshot_results if r.success),
                 "failed": sum(1 for r in snapshot_results if not r.success),
@@ -559,6 +707,7 @@ async def _run_sync(args: argparse.Namespace) -> int:
                         "s3_key": r.s3_key,
                         "size_bytes": r.size_bytes,
                         "content_hash": r.content_hash,
+                        "snapshot_namespace": r.snapshot_namespace,
                         "success": r.success,
                         "error": r.error,
                     }
@@ -582,34 +731,39 @@ async def _run_sync(args: argparse.Namespace) -> int:
                         logger.info(f"- {err}")
             return 0 if summary["failed"] == 0 else 1
 
-        async with SyncOrchestrator(config) as orchestrator:
-            snapshot_result = await orchestrator.download_latest_snapshots()
-
-        summary = {
-            "mode": args.mode,
-            "snapshot_token": snapshot_result.snapshot_token,
-            "chroma_snapshot": snapshot_result.chroma_snapshot,
-            "sqlite_snapshot": snapshot_result.sqlite_snapshot,
-            "bytes_downloaded": snapshot_result.bytes_downloaded,
-            "success": snapshot_result.success,
-            "error": snapshot_result.error,
-        }
-
-        if args.json:
-            logger.info(json.dumps(summary, indent=2))
-        else:
-            if snapshot_result.success:
-                downloaded_mb = snapshot_result.bytes_downloaded / (1024 * 1024)
-                logger.info(
-                    f"Sync complete. {downloaded_mb:.1f}MB downloaded. "
-                    "Vector DB is now live and ready for search."
+        if args.mode == "snapshot-download":
+            async with SyncOrchestrator(config) as orchestrator:
+                snapshot_result = await orchestrator.download_latest_snapshots(
+                    model_name=config.model_name,
+                    tier=config.model_tier,
                 )
+
+            summary = {
+                "mode": args.mode,
+                "snapshot_namespace": snapshot_result.snapshot_namespace,
+                "snapshot_token": snapshot_result.snapshot_token,
+                "chroma_snapshot": snapshot_result.chroma_snapshot,
+                "sqlite_snapshot": snapshot_result.sqlite_snapshot,
+                "bytes_downloaded": snapshot_result.bytes_downloaded,
+                "success": snapshot_result.success,
+                "error": snapshot_result.error,
+            }
+
+            if args.json:
+                logger.info(json.dumps(summary, indent=2))
             else:
-                logger.info(
-                    f"Sync status ({args.mode}): failed "
-                    f"({snapshot_result.error or 'unknown error'})"
-                )
-        return 0 if snapshot_result.success else 1
+                if snapshot_result.success:
+                    downloaded_mb = snapshot_result.bytes_downloaded / (1024 * 1024)
+                    logger.info(
+                        f"Sync complete. {downloaded_mb:.1f}MB downloaded. "
+                        "Vector DB is now live and ready for search."
+                    )
+                else:
+                    logger.info(
+                        f"Sync status ({args.mode}): failed "
+                        f"({snapshot_result.error or 'unknown error'})"
+                    )
+            return 0 if snapshot_result.success else 1
 
     if args.all and any([args.module, args.version, args.submodule]):
         raise SystemExit("--all cannot be combined with --module/--version/--submodule")
@@ -627,7 +781,7 @@ async def _run_sync(args: argparse.Namespace) -> int:
 async def _run_status(args: argparse.Namespace) -> int:
     config = SyncConfig.from_env()
     if args.data_dir:
-        config = config.model_copy(update={"local_data_dir": args.data_dir})
+        config = config.model_copy(update={"local_data_dir": Path(args.data_dir)})
     if args.all and any([args.module, args.version, args.submodule]):
         raise SystemExit("--all cannot be combined with --module/--version/--submodule")
     if args.submodule and not args.module:
@@ -669,21 +823,32 @@ async def _run_index(args: argparse.Namespace) -> int:
     config = VectorConfig.from_env()
     updates: dict[str, Any] = {}
     if args.data_dir:
-        updates["data_dir"] = args.data_dir
+        updates["data_dir"] = Path(args.data_dir)
     if args.db_filename:
         updates["db_filename"] = args.db_filename
     if args.docs_subdir:
         updates["docs_subdir"] = args.docs_subdir
     if args.chroma_dir:
-        updates["chroma_dir"] = args.chroma_dir
+        updates["chroma_dir"] = Path(args.chroma_dir)
     if args.collection:
         updates["collection_name"] = args.collection
     if args.embed_model:
         updates["embedding_model"] = args.embed_model
+    selected_tier = getattr(args, "tier", "main")
+    updates["embedding_tier"] = selected_tier
+    resolved_model = args.embed_model or default_model_for_tier(selected_tier)
+    updates["embedding_model"] = resolved_model
+    if not args.chroma_dir and not os.environ.get(VectorConfig.ENV_CHROMA_DIR):
+        updates["chroma_dir"] = _tier_chroma_dir(selected_tier, resolved_model)
+    default_chunk_size, default_overlap = chunk_defaults_for_tier(selected_tier)
     if args.max_tokens is not None:
         updates["max_tokens"] = args.max_tokens
+    else:
+        updates["max_tokens"] = default_chunk_size
     if args.overlap_tokens is not None:
         updates["overlap_tokens"] = args.overlap_tokens
+    else:
+        updates["overlap_tokens"] = default_overlap
     if args.batch_size is not None:
         updates["batch_size"] = args.batch_size
     if args.chunk_workers is not None:
@@ -692,9 +857,15 @@ async def _run_index(args: argparse.Namespace) -> int:
         updates["chroma_upsert_batch_size"] = args.upsert_batch_size
     if updates:
         config = config.model_copy(update=updates)
+    await _auto_refresh_runtime_snapshots(
+        model_name=config.embedding_model,
+        tier=config.embedding_tier,
+        data_dir=config.data_dir,
+    )
 
     reset_count = 0
     deleted_vectors = 0
+    logger.info(f"Starting indexing with config: {config.model_dump_json(indent=2)}")
     if args.reindex:
         storage = StorageManager(config.db_path)
         await storage.connect()
@@ -743,10 +914,12 @@ async def _run_index(args: argparse.Namespace) -> int:
         stats = await indexer.index_unindexed(limit=args.limit)
 
     bm25_index_built = False
-    if args.build_bm25:
+    if args.build_bm25 and config.embedding_tier != "main":
         retriever = HybridRetriever(config=config)
         retriever.build_bm25_index()
         bm25_index_built = True
+    elif args.build_bm25:
+        logger.info("Skipping BM25 build for tier=main; using model-native retrieval path")
 
     payload = {
         "documents_indexed": stats.documents_indexed,
@@ -773,7 +946,22 @@ async def _run_serve(args: argparse.Namespace) -> int:
     """Run MCP server."""
     from everspring_mcp.mcp.server import create_server
 
-    server = create_server()
+    config = VectorConfig.from_env()
+    selected_tier = getattr(args, "tier", "main")
+    resolved_model = default_model_for_tier(selected_tier)
+    updates: dict[str, Any] = {
+        "embedding_tier": selected_tier,
+        "embedding_model": resolved_model,
+    }
+    if not os.environ.get(VectorConfig.ENV_CHROMA_DIR):
+        updates["chroma_dir"] = _tier_chroma_dir(selected_tier, resolved_model)
+    config = config.model_copy(update=updates)
+    await _auto_refresh_runtime_snapshots(
+        model_name=config.embedding_model,
+        tier=config.embedding_tier,
+        data_dir=config.data_dir,
+    )
+    server = create_server(config=config)
 
     if args.json:
         # Output status and continue
@@ -797,51 +985,51 @@ async def _run_serve(args: argparse.Namespace) -> int:
 async def _run_client(args: argparse.Namespace) -> int:
     """Run interactive client."""
     from everspring_mcp.mcp.terminal_search import LocalSearchCLI
-    
+
     show_progress = not getattr(args, 'no_progress', False)
     client = LocalSearchCLI(show_progress=show_progress)
-    
+
     logger.info("EverSpring MCP - Spring Documentation Search")
     logger.info("=" * 50)
     logger.info("Commands: 'status', 'modules', 'quit', or enter a search query")
     logger.info("Syntax: query [module=X] [version=N] [submodule=X]")
     logger.info("")
-    
+
     await client.initialize()
-    
+
     while True:
         try:
             user_input = input("\n> ").strip()
         except (EOFError, KeyboardInterrupt):
             logger.info("\nGoodbye!")
             break
-        
+
         if not user_input:
             continue
-        
+
         if user_input.lower() == "quit":
             logger.info("Goodbye!")
             break
-        
+
         if user_input.lower() == "status":
             status = await client.get_status()
             logger.info(client.format_status(status))
             continue
-        
+
         if user_input.lower() == "modules":
             modules = await client.list_modules()
             logger.info("Available modules:")
             for mod in modules:
                 logger.info(f"  - {mod}")
             continue
-        
+
         # Parse search query with optional filters
         parts = user_input.split()
         query_parts: list[str] = []
         module: str | None = None
         version: int | None = None
         submodule: str | None = None
-        
+
         for part in parts:
             if part.startswith("module="):
                 module = part.split("=", 1)[1]
@@ -855,12 +1043,12 @@ async def _run_client(args: argparse.Namespace) -> int:
                 submodule = part.split("=", 1)[1]
             else:
                 query_parts.append(part)
-        
+
         query = " ".join(query_parts)
         if not query:
             logger.info("Please provide a search query")
             continue
-        
+
         # Run search
         response = await client.search(
             query=query,
@@ -868,23 +1056,37 @@ async def _run_client(args: argparse.Namespace) -> int:
             version=version,
             submodule=submodule,
         )
-        
+
         logger.info("")
         logger.info(client.format_results(response))
-    
+
     return 0
 
 
 async def _run_search(args: argparse.Namespace) -> int:
     """Run hybrid search command."""
     config = VectorConfig.from_env()
+    selected_tier = getattr(args, "tier", "main")
+    resolved_model = default_model_for_tier(selected_tier)
+    updates: dict[str, Any] = {
+        "embedding_tier": selected_tier,
+        "embedding_model": resolved_model,
+    }
+    if not os.environ.get(VectorConfig.ENV_CHROMA_DIR):
+        updates["chroma_dir"] = _tier_chroma_dir(selected_tier, resolved_model)
+    config = config.model_copy(update=updates)
+    await _auto_refresh_runtime_snapshots(
+        model_name=config.embedding_model,
+        tier=config.embedding_tier,
+        data_dir=config.data_dir,
+    )
     retriever = HybridRetriever(config=config)
-    
-    # Build BM25 index if requested or not exists
-    if args.build_index or not retriever.ensure_bm25_index():
+
+    # Build BM25 index for non-main tiers if requested or not exists
+    if config.embedding_tier != "main" and (args.build_index or not retriever.ensure_bm25_index()):
         logger.info("Building BM25 index...")
         retriever.build_bm25_index()
-    
+
     # Run search
     results = await retriever.search(
         query=args.query,
@@ -893,7 +1095,7 @@ async def _run_search(args: argparse.Namespace) -> int:
         version_major=args.version,
         deduplicate_urls=not args.no_dedup,
     )
-    
+
     if args.json:
         output = [
             {
@@ -914,7 +1116,7 @@ async def _run_search(args: argparse.Namespace) -> int:
         if not results:
             logger.info("No results found.")
             return 0
-        
+
         for i, r in enumerate(results, 1):
             logger.info(f"\n{'='*60}")
             logger.info(f"[{i}] {r.title}")
@@ -923,7 +1125,7 @@ async def _run_search(args: argparse.Namespace) -> int:
             logger.info(f"    Score: {r.score:.4f} (dense: #{r.dense_rank}, sparse: #{r.sparse_rank})")
             logger.info(f"{'='*60}")
             logger.info(r.content)
-    
+
     return 0
 
 
@@ -945,6 +1147,7 @@ async def _run_model_cache(args: argparse.Namespace) -> int:
     embedder = Embedder(
         model_name=config.embedding_model,
         batch_size=config.batch_size,
+        tier=config.embedding_tier,
     )
     await embedder.prefetch_model()
 
