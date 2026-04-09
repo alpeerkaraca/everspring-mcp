@@ -132,6 +132,27 @@ async def test_upload_db_snapshots_reports_failure_when_sqlite_missing(
 
 
 @pytest.mark.asyncio
+async def test_upload_db_snapshots_reports_failure_when_chroma_empty(
+    mock_s3: Any,
+    sync_config: SyncConfig,
+) -> None:
+    """Empty ChromaDB directory should fail instead of uploading placeholder archive."""
+    sync_config.db_path.write_bytes(b"sqlite-local-content")
+    sync_config.chroma_dir.mkdir(parents=True, exist_ok=True)
+
+    service = S3SyncService(sync_config, s3_client=mock_s3)
+    results = await service.upload_db_snapshots(snapshot_date=date(2026, 4, 6))
+
+    assert len(results) == 2
+    failed = [r for r in results if not r.success]
+    assert len(failed) == 1
+    assert failed[0].snapshot_name == "chroma_db_2026_04_06.zip"
+    assert failed[0].error is not None
+    assert "chroma" in failed[0].error.lower()
+    assert "empty" in failed[0].error.lower()
+
+
+@pytest.mark.asyncio
 async def test_upload_db_snapshots_includes_bm25_when_present(
     mock_s3: Any,
     sync_config: SyncConfig,

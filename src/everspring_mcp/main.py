@@ -120,13 +120,14 @@ async def _auto_refresh_runtime_snapshots(
     if os.environ.get("EVERSPRING_AUTO_SNAPSHOT_RESTARTED") == "1":
         return
 
-    sync_config = SyncConfig.from_env().model_copy(
-        update={
-            "local_data_dir": data_dir,
-            "model_name": model_name,
-            "model_tier": tier,
-        }
-    )
+    chroma_override = os.environ.get(VectorConfig.ENV_CHROMA_DIR)
+    sync_updates: dict[str, Any] = {
+        "local_data_dir": data_dir,
+        "model_name": model_name,
+        "model_tier": tier,
+        "chroma_subdir": chroma_override or str(_tier_chroma_dir(tier, model_name)),
+    }
+    sync_config = SyncConfig.from_env().model_copy(update=sync_updates)
     sync_config.ensure_directories()
     service = S3SyncService(sync_config)
     try:
@@ -221,7 +222,11 @@ def _build_parser() -> argparse.ArgumentParser:
     sync.add_argument(
         "--all",
         action="store_true",
-        help="Sync all discovered module/submodule/version targets from config\\module_submodule_urls.csv",
+        help=(
+            "For manifest modes: sync all discovered module/submodule/version targets from "
+            "config\\module_submodule_urls.csv. For snapshot-upload: upload snapshots for all "
+            "default embedding tiers."
+        ),
     )
     sync.add_argument(
         "--mode",
@@ -676,27 +681,63 @@ async def _run_sync(args: argparse.Namespace) -> int:
     if args.mode in {"manifest", "manifest-prime"}:
         updates["parallel_jobs"] = args.parallel_jobs
         updates["download_concurrency"] = args.parallel_jobs
+    if args.mode in {"snapshot-upload", "snapshot-download"} and not (
+        args.mode == "snapshot-upload" and args.all
+    ):
+        effective_snapshot_tier = updates.get("model_tier", config.model_tier)
+        effective_snapshot_model = updates.get("model_name", config.model_name)
+        snapshot_chroma_override = os.environ.get(VectorConfig.ENV_CHROMA_DIR)
+        updates["chroma_subdir"] = snapshot_chroma_override or str(
+            _tier_chroma_dir(effective_snapshot_tier, effective_snapshot_model)
+        )
     if updates:
         config = config.model_copy(update=updates)
 
     if args.mode in {"snapshot-upload", "snapshot-download"}:
         if args.force:
             raise SystemExit("--force is only supported with --mode manifest or --mode manifest-prime")
-        if any([args.all, args.module, args.version, args.submodule]):
+        if any([args.module, args.version, args.submodule]):
             raise SystemExit(
-                f"--mode {args.mode} does not accept --all/--module/--version/--submodule"
+                f"--mode {args.mode} does not accept --module/--version/--submodule"
+            )
+        if args.mode == "snapshot-download" and args.all:
+            raise SystemExit("--all is only supported with --mode snapshot-upload")
+        if args.mode == "snapshot-upload" and args.all and any([snapshot_tier, snapshot_model]):
+            raise SystemExit(
+                "--all cannot be combined with --snapshot-model/--snapshot-tier for --mode snapshot-upload"
             )
 
         if args.mode == "snapshot-upload":
-            s3_service = S3SyncService(config)
-            snapshot_results = await s3_service.upload_db_snapshots(
-                model_name=config.model_name,
-                tier=config.model_tier,
-            )
+            upload_configs: list[SyncConfig] = []
+            if args.all:
+                for tier_name in ("main", "slim", "xslim"):
+                    tier_model = default_model_for_tier(tier_name)
+                    upload_configs.append(
+                        config.model_copy(
+                            update={
+                                "model_tier": tier_name,
+                                "model_name": tier_model,
+                                "chroma_subdir": str(_tier_chroma_dir(tier_name, tier_model)),
+                            }
+                        )
+                    )
+            else:
+                upload_configs.append(config)
+
+            snapshot_results = []
+            for upload_config in upload_configs:
+                s3_service = S3SyncService(upload_config)
+                snapshot_results.extend(
+                    await s3_service.upload_db_snapshots(
+                        model_name=upload_config.model_name,
+                        tier=upload_config.model_tier,
+                    )
+                )
 
             summary = {
                 "mode": args.mode,
-                "snapshot_namespace": config.get_snapshot_namespace(),
+                "scope": "all-tiers" if args.all else "single-namespace",
+                "snapshot_namespaces": sorted({r.snapshot_namespace for r in snapshot_results}),
                 "snapshots": len(snapshot_results),
                 "completed": sum(1 for r in snapshot_results if r.success),
                 "failed": sum(1 for r in snapshot_results if not r.success),

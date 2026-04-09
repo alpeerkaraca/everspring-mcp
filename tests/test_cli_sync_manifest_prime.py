@@ -235,3 +235,181 @@ async def test_run_sync_snapshot_download_uses_orchestrator_summary(
     capsys.readouterr()
 
     assert exit_code == 0
+
+
+@pytest.mark.asyncio
+async def test_run_sync_snapshot_upload_defaults_chroma_dir_to_tier_namespace(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, str] = {}
+
+    class FakeService:
+        def __init__(self, config: SyncConfig) -> None:
+            captured["chroma_dir"] = str(config.chroma_dir)
+            captured["model_name"] = config.model_name
+            captured["model_tier"] = config.model_tier
+
+        async def upload_db_snapshots(
+            self,
+            snapshot_date=None,
+            cleanup_local_archives: bool = False,
+            model_name: str | None = None,
+            tier: str | None = None,
+        ) -> list[object]:
+            del snapshot_date, cleanup_local_archives, model_name, tier
+            return []
+
+    def fake_from_env(cls: type[SyncConfig]) -> SyncConfig:
+        return cls(
+            s3_bucket="test-bucket",
+            s3_region="us-east-1",
+            s3_prefix="test-docs",
+            local_data_dir=tmp_path,
+        )
+
+    monkeypatch.delenv("EVERSPRING_CHROMA_DIR", raising=False)
+    monkeypatch.setattr(cli_main, "S3SyncService", FakeService)
+    monkeypatch.setattr(
+        SyncConfig,
+        "from_env",
+        classmethod(fake_from_env),
+    )
+
+    args = argparse.Namespace(
+        mode="snapshot-upload",
+        force=False,
+        all=False,
+        module=None,
+        version=None,
+        submodule=None,
+        parallel_jobs=5,
+        s3_bucket=None,
+        s3_region=None,
+        s3_prefix=None,
+        snapshot_model="BAAI/bge-small-en-v1.5",
+        snapshot_tier="xslim",
+        data_dir=None,
+        json=True,
+    )
+
+    exit_code = await cli_main._run_sync(args)
+
+    assert exit_code == 0
+    assert captured["model_name"] == "BAAI/bge-small-en-v1.5"
+    assert captured["model_tier"] == "xslim"
+    assert captured["chroma_dir"] == str(Path.home() / ".everspring" / "chroma-xslim-bge-small-en-v1-5")
+
+
+@pytest.mark.asyncio
+async def test_run_sync_snapshot_upload_all_uploads_all_default_tiers(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    uploads: list[tuple[str, str, str]] = []
+
+    class FakeService:
+        def __init__(self, config: SyncConfig) -> None:
+            self.config = config
+
+        async def upload_db_snapshots(
+            self,
+            snapshot_date=None,
+            cleanup_local_archives: bool = False,
+            model_name: str | None = None,
+            tier: str | None = None,
+        ) -> list[object]:
+            del snapshot_date, cleanup_local_archives
+            assert model_name is not None
+            assert tier is not None
+            uploads.append((tier, model_name, str(self.config.chroma_dir)))
+            return []
+
+    def fake_from_env(cls: type[SyncConfig]) -> SyncConfig:
+        return cls(
+            s3_bucket="test-bucket",
+            s3_region="us-east-1",
+            s3_prefix="test-docs",
+            local_data_dir=tmp_path,
+        )
+
+    monkeypatch.setattr(cli_main, "S3SyncService", FakeService)
+    monkeypatch.setattr(
+        SyncConfig,
+        "from_env",
+        classmethod(fake_from_env),
+    )
+
+    args = argparse.Namespace(
+        mode="snapshot-upload",
+        force=False,
+        all=True,
+        module=None,
+        version=None,
+        submodule=None,
+        parallel_jobs=5,
+        s3_bucket=None,
+        s3_region=None,
+        s3_prefix=None,
+        snapshot_model=None,
+        snapshot_tier=None,
+        data_dir=None,
+        json=True,
+    )
+
+    exit_code = await cli_main._run_sync(args)
+
+    assert exit_code == 0
+    assert uploads == [
+        ("main", "BAAI/bge-m3", str(Path.home() / ".everspring" / "chroma-main-bge-m3")),
+        (
+            "slim",
+            "BAAI/bge-base-en-v1.5",
+            str(Path.home() / ".everspring" / "chroma-slim-bge-base-en-v1-5"),
+        ),
+        (
+            "xslim",
+            "BAAI/bge-small-en-v1.5",
+            str(Path.home() / ".everspring" / "chroma-xslim-bge-small-en-v1-5"),
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_run_sync_snapshot_upload_all_rejects_snapshot_namespace_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    def fake_from_env(cls: type[SyncConfig]) -> SyncConfig:
+        return cls(
+            s3_bucket="test-bucket",
+            s3_region="us-east-1",
+            s3_prefix="test-docs",
+            local_data_dir=tmp_path,
+        )
+
+    monkeypatch.setattr(
+        SyncConfig,
+        "from_env",
+        classmethod(fake_from_env),
+    )
+
+    args = argparse.Namespace(
+        mode="snapshot-upload",
+        force=False,
+        all=True,
+        module=None,
+        version=None,
+        submodule=None,
+        parallel_jobs=5,
+        s3_bucket=None,
+        s3_region=None,
+        s3_prefix=None,
+        snapshot_model="BAAI/bge-m3",
+        snapshot_tier=None,
+        data_dir=None,
+        json=True,
+    )
+
+    with pytest.raises(SystemExit, match="--all cannot be combined"):
+        await cli_main._run_sync(args)

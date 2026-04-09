@@ -456,12 +456,11 @@ class S3SyncService:
             compression=zipfile.ZIP_DEFLATED,
         ) as bundle:
             chroma_files = sorted(p for p in chroma_dir.rglob("*") if p.is_file())
-            if chroma_files:
-                for file_path in chroma_files:
-                    relative = file_path.relative_to(chroma_dir).as_posix()
-                    bundle.write(file_path, arcname=relative)
-            else:
-                bundle.writestr(".chroma-empty", "")
+            if not chroma_files:
+                raise ValueError(f"ChromaDB directory is empty: {chroma_dir}")
+            for file_path in chroma_files:
+                relative = file_path.relative_to(chroma_dir).as_posix()
+                bundle.write(file_path, arcname=relative)
 
         archive_hash = self._compute_file_hash(archive_path)
         archive_size = archive_path.stat().st_size
