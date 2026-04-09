@@ -10,7 +10,7 @@ import pytest
 
 from everspring_mcp.vector.chunking import MarkdownChunker
 from everspring_mcp.vector.config import VectorConfig
-from everspring_mcp.vector.embeddings import Embedder
+from everspring_mcp.vector.embeddings import DEFAULT_MAIN_MODEL, Embedder
 from everspring_mcp.vector.indexer import HNSW_FINALIZATION_MESSAGE, VectorIndexer
 
 
@@ -34,7 +34,7 @@ More content here.
 
 def test_chunking_hybrid(sample_markdown: str) -> None:
     chunker = MarkdownChunker(
-        model_name="google/embeddinggemma-300m",
+        model_name=DEFAULT_MAIN_MODEL,
         max_tokens=50,
         overlap_tokens=5,
     )
@@ -46,7 +46,7 @@ def test_chunking_hybrid(sample_markdown: str) -> None:
 
 def test_chunking_removes_copied_artifacts() -> None:
     chunker = MarkdownChunker(
-        model_name="google/embeddinggemma-300m",
+        model_name=DEFAULT_MAIN_MODEL,
         max_tokens=120,
         overlap_tokens=10,
     )
@@ -96,10 +96,12 @@ async def test_prefetch_model_loads_once(monkeypatch: pytest.MonkeyPatch) -> Non
             model_name: str,
             device: str | None = None,
             model_kwargs: dict[str, object] | None = None,
+            tokenizer_kwargs: dict[str, object] | None = None,
         ) -> None:
             del model_name
             assert device == "cuda"
             assert model_kwargs is not None
+            assert tokenizer_kwargs == {"use_fast": True}
             nonlocal load_calls
             load_calls += 1
 
@@ -114,6 +116,9 @@ async def test_prefetch_model_loads_once(monkeypatch: pytest.MonkeyPatch) -> Non
 
     fake_torch = types.SimpleNamespace(
         cuda=FakeCuda(),
+        backends=types.SimpleNamespace(
+            mps=types.SimpleNamespace(is_available=lambda: False),
+        ),
         bfloat16="bf16",
     )
     fake_module = types.SimpleNamespace(SentenceTransformer=FakeSentenceTransformer)
@@ -125,28 +130,6 @@ async def test_prefetch_model_loads_once(monkeypatch: pytest.MonkeyPatch) -> Non
     await embedder.prefetch_model()
 
     assert load_calls == 1
-
-
-def test_embedder_resolve_cuda_bfloat16_fails_without_cuda(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class FakeCuda:
-        @staticmethod
-        def is_available() -> bool:
-            return False
-
-        @staticmethod
-        def is_bf16_supported() -> bool:
-            return False
-
-    fake_torch = types.SimpleNamespace(
-        cuda=FakeCuda(),
-        bfloat16="bf16",
-    )
-    monkeypatch.setitem(sys.modules, "torch", fake_torch)
-
-    with pytest.raises(RuntimeError, match="CUDA is required"):
-        Embedder._resolve_cuda_bfloat16()
 
 
 @pytest.mark.asyncio
@@ -241,9 +224,13 @@ def test_chunker_tokenizer_encode_is_quiet(monkeypatch: pytest.MonkeyPatch) -> N
             del skip_special_tokens
             return " ".join("tok" for _ in token_ids)
 
+    def fake_from_pretrained(_model_name: str, **kwargs: object) -> FakeTokenizer:
+        assert kwargs.get("use_fast") is True
+        return FakeTokenizer()
+
     monkeypatch.setattr(
         "everspring_mcp.vector.chunking.AutoTokenizer.from_pretrained",
-        lambda _model_name: FakeTokenizer(),
+        fake_from_pretrained,
     )
 
     chunker = MarkdownChunker(
@@ -295,18 +282,12 @@ async def test_embedder_truncates_over_limit_inputs(monkeypatch: pytest.MonkeyPa
             self.tokenizer = FakeTokenizer()
             self.last_texts: list[str] = []
 
-        def encode(
+        def embed(
             self,
             texts: list[str],
-            convert_to_numpy: bool = True,
-            batch_size: int | None = None,
-            show_progress_bar: bool | None = None,
-            normalize_embeddings: bool | None = None,
+            batch_size: int,
         ) -> list[FakeVector]:
-            del convert_to_numpy
             del batch_size
-            del show_progress_bar
-            del normalize_embeddings
             self.last_texts = list(texts)
             return [FakeVector([0.1, 0.2, 0.3]) for _ in texts]
 
@@ -325,7 +306,7 @@ async def test_embedder_truncates_over_limit_inputs(monkeypatch: pytest.MonkeyPa
 def test_chunking_enforces_token_limit() -> None:
     """Test that chunks never exceed max_tokens."""
     chunker = MarkdownChunker(
-        model_name="google/embeddinggemma-300m",
+        model_name=DEFAULT_MAIN_MODEL,
         max_tokens=100,
         overlap_tokens=10,
     )
@@ -381,4 +362,3 @@ def test_emit_finalization_heartbeat_logs_expected_message(caplog: pytest.LogCap
     VectorIndexer._emit_finalization_heartbeat()
 
     assert HNSW_FINALIZATION_MESSAGE in caplog.text
-

@@ -12,7 +12,7 @@ from everspring_mcp.utils.logging import get_logger
 from everspring_mcp.vector.bm25_index import BM25Index
 from everspring_mcp.vector.chroma_client import ChromaClient
 from everspring_mcp.vector.config import VectorConfig
-from everspring_mcp.vector.embeddings import Embedder
+from everspring_mcp.vector.embeddings import MAIN_TIER, Embedder
 
 logger = get_logger("vector.retriever")
 
@@ -53,7 +53,9 @@ class HybridRetriever:
         self._embedder = Embedder(
             model_name=self.config.embedding_model,
             batch_size=self.config.batch_size,
+            tier=self.config.embedding_tier,
         )
+        self._use_native_main_retrieval = self.config.embedding_tier == MAIN_TIER
         logger.info(
             f"HybridRetriever initialized in {time.perf_counter() - start:.2f}s"
         )
@@ -82,6 +84,14 @@ class HybridRetriever:
         """
         # Build filter for ChromaDB
         where = self._build_where_filter(module, version_major)
+
+        if self._use_native_main_retrieval:
+            dense_results = await self._dense_search(query, max(fetch_k, top_k), where)
+            return self._dense_results_to_search_results(
+                dense_results=dense_results,
+                top_k=top_k,
+                deduplicate_urls=deduplicate_urls,
+            )
 
         # Run both retrievals in parallel
         logger.debug(
@@ -174,6 +184,45 @@ class HybridRetriever:
 
         return results
 
+    @staticmethod
+    def _dense_results_to_search_results(
+        dense_results: list[dict[str, Any]],
+        top_k: int,
+        deduplicate_urls: bool,
+    ) -> list[SearchResult]:
+        results: list[SearchResult] = []
+        seen_urls: set[str] = set()
+        for rank, item in enumerate(dense_results, start=1):
+            meta = item.get("metadata", {})
+            url = str(meta.get("url", "")).strip()
+            if deduplicate_urls and url:
+                if url in seen_urls:
+                    continue
+                seen_urls.add(url)
+
+            distance = item.get("distance", 0.0) or 0.0
+            score = 1.0 / (1.0 + max(float(distance), 0.0))
+            results.append(
+                SearchResult(
+                    id=item.get("id", ""),
+                    content=item.get("content", ""),
+                    title=meta.get("title", ""),
+                    url=url,
+                    module=meta.get("module", ""),
+                    submodule=meta.get("submodule") or None,
+                    version_major=meta.get("version_major", 0),
+                    version_minor=meta.get("version_minor", 0),
+                    score=score,
+                    dense_rank=rank,
+                    sparse_rank=None,
+                    section_path=meta.get("section_path", ""),
+                    has_code=meta.get("has_code", False),
+                )
+            )
+            if len(results) >= top_k:
+                break
+        return results
+
     async def _dense_search(
         self,
         query: str,
@@ -231,7 +280,7 @@ class HybridRetriever:
         """
         scores: dict[str, float] = defaultdict(float)
 
-        for ranking, weight in zip(rankings, weights):
+        for ranking, weight in zip(rankings, weights, strict=False):
             for rank, doc_id in enumerate(ranking, start=1):
                 scores[doc_id] += weight * (1.0 / (self.RRF_K + rank))
 
@@ -261,6 +310,9 @@ class HybridRetriever:
 
         Call this after indexing new documents.
         """
+        if self._use_native_main_retrieval:
+            logger.info("Skipping BM25 build for tier=main; using native model retrieval path")
+            return
         collection = self._chroma.get_collection()
 
         total_docs = collection.count()
@@ -310,6 +362,8 @@ class HybridRetriever:
         Returns:
             True if index is ready, False if needs building
         """
+        if self._use_native_main_retrieval:
+            return True
         if self._bm25.is_loaded:
             return True
         return self._bm25.load()

@@ -128,7 +128,7 @@ def test_build_bm25_index_fetches_chroma_in_batches(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    config = VectorConfig(data_dir=tmp_path, chroma_dir=tmp_path / "chroma")
+    config = VectorConfig(data_dir=tmp_path, chroma_dir=tmp_path / "chroma", embedding_tier="slim")
     retriever = HybridRetriever(config=config)
 
     class FakeCollection:
@@ -184,3 +184,27 @@ def test_build_bm25_index_fetches_chroma_in_batches(
         "metadatas": 2501,
         "saved": 1,
     }
+
+
+@pytest.mark.asyncio
+async def test_search_main_tier_skips_bm25(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    config = VectorConfig(data_dir=tmp_path, chroma_dir=tmp_path / "chroma", embedding_tier="main")
+    retriever = HybridRetriever(config=config)
+
+    async def fake_dense_search(
+        query: str,
+        top_k: int,
+        where: dict[str, Any] | None,
+    ) -> list[dict[str, Any]]:
+        del query, top_k, where
+        return _mock_dense_results()
+
+    def fail_bm25_search(*args: Any, **kwargs: Any) -> list[object]:
+        raise AssertionError("BM25 should not be used for main tier")
+
+    monkeypatch.setattr(retriever, "_dense_search", fake_dense_search)
+    monkeypatch.setattr(retriever._bm25, "search", fail_bm25_search)
+
+    results = await retriever.search("datasource", top_k=2, deduplicate_urls=True)
+    assert len(results) == 2
+    assert all(r.sparse_rank is None for r in results)

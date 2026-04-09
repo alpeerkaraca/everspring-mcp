@@ -19,6 +19,8 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+.playwright-mcp
+
 
 # Virtual environments
 .venv/
@@ -61,3 +63,16 @@ Thumbs.db
 # Logs
 *.log
 logs/
+
+# Cache
+.mypy_cache/
+.pytest_cache/
+
+
+# MCP Files
+*.mcp
+**/.playwright-mcp/**
+
+# lock
+uv.lock
+uv.lock

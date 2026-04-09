@@ -8,6 +8,7 @@ import pytest
 
 from everspring_mcp import main as cli_main
 from everspring_mcp.vector.config import VectorConfig
+from everspring_mcp.vector.embeddings import DEFAULT_MAIN_MODEL
 
 
 @pytest.mark.asyncio
@@ -44,9 +45,10 @@ async def test_run_model_cache_uses_defaults(
     captured: dict[str, object] = {}
 
     class FakeEmbedder:
-        def __init__(self, model_name: str, batch_size: int) -> None:
+        def __init__(self, model_name: str, batch_size: int, tier: str) -> None:
             captured["model_name"] = model_name
             captured["batch_size"] = batch_size
+            captured["tier"] = tier
 
         async def prefetch_model(self) -> None:
             captured["prefetched"] = True
@@ -64,6 +66,6 @@ async def test_run_model_cache_uses_defaults(
 
     assert exit_code == 0
     assert captured["prefetched"] is True
-    assert captured["model_name"] == "google/embeddinggemma-300m"
+    assert captured["model_name"] == DEFAULT_MAIN_MODEL
     assert captured["batch_size"] == 128
-
+    assert captured["tier"] == "main"

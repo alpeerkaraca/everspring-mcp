@@ -68,8 +68,8 @@ async def test_upload_db_snapshots_uses_separated_snapshot_keys(
     assert len(results) == 2
     assert all(r.success for r in results)
 
-    expected_chroma_key = "test-docs/db-snapshots/chroma_db_2026_04_06.zip"
-    expected_sqlite_key = "test-docs/db-snapshots/sqlite_metadata_2026_04_06.zip"
+    expected_chroma_key = "test-docs/db-snapshots/bge-m3-main/chroma_db_2026_04_06.zip"
+    expected_sqlite_key = "test-docs/db-snapshots/bge-m3-main/sqlite_metadata_2026_04_06.zip"
     by_key = {r.s3_key: r for r in results}
     assert set(by_key) == {expected_chroma_key, expected_sqlite_key}
 
@@ -146,7 +146,7 @@ async def test_upload_db_snapshots_includes_bm25_when_present(
     snapshot_date = date(2026, 4, 6)
     await service.upload_db_snapshots(snapshot_date=snapshot_date)
 
-    sqlite_key = "test-docs/db-snapshots/sqlite_metadata_2026_04_06.zip"
+    sqlite_key = "test-docs/db-snapshots/bge-m3-main/sqlite_metadata_2026_04_06.zip"
     sqlite_obj = mock_s3.get_object(Bucket=sync_config.s3_bucket, Key=sqlite_key)
     sqlite_payload = sqlite_obj["Body"].read()
     with zipfile.ZipFile(io.BytesIO(sqlite_payload), mode="r") as archive:

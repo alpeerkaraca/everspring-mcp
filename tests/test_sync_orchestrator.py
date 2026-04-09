@@ -92,8 +92,10 @@ async def test_download_latest_snapshots_closes_and_reopens_storage(
         async def download_latest_db_snapshots(
             self,
             cleanup_local_archives: bool = True,
+            model_name: str | None = None,
+            tier: str | None = None,
         ) -> SnapshotDownloadResult:
-            del cleanup_local_archives
+            del cleanup_local_archives, model_name, tier
             return SnapshotDownloadResult(
                 snapshot_token="2026_04_08",
                 chroma_snapshot="chroma_db_2026_04_08.zip",

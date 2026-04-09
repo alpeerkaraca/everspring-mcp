@@ -363,6 +363,8 @@ class SyncOrchestrator:
     async def download_latest_snapshots(
         self,
         cleanup_local_archives: bool = True,
+        model_name: str | None = None,
+        tier: str | None = None,
     ) -> SnapshotDownloadResult:
         """Download and atomically apply the latest matching DB snapshots."""
         await self._report_progress("Resolving latest DB snapshot pair")
@@ -375,7 +377,9 @@ class SyncOrchestrator:
 
         try:
             result = await self.s3.download_latest_db_snapshots(
-                cleanup_local_archives=cleanup_local_archives
+                cleanup_local_archives=cleanup_local_archives,
+                model_name=model_name or self.config.model_name,
+                tier=tier or self.config.model_tier,
             )
         finally:
             if storage_temporarily_closed:

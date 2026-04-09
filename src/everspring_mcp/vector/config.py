@@ -8,7 +8,27 @@ from __future__ import annotations
 from pathlib import Path
 from typing import ClassVar
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from everspring_mcp.vector.embeddings import (
+    DEFAULT_MAIN_MODEL,
+    MAIN_TIER,
+    VALID_EMBEDDING_TIERS,
+)
+
+TIER_CHUNKING_DEFAULTS: dict[str, dict[str, int]] = {
+    "main": {"chunk_size": 2048, "overlap": 200},
+    "slim": {"chunk_size": 512, "overlap": 50},
+    "xslim": {"chunk_size": 384, "overlap": 40},
+}
+
+
+def chunk_defaults_for_tier(tier: str) -> tuple[int, int]:
+    normalized = tier.strip().lower()
+    if normalized not in TIER_CHUNKING_DEFAULTS:
+        raise ValueError(f"Unsupported embedding tier '{tier}'")
+    defaults = TIER_CHUNKING_DEFAULTS[normalized]
+    return defaults["chunk_size"], defaults["overlap"]
 
 
 def _default_chroma_dir() -> Path:
@@ -55,6 +75,8 @@ class VectorConfig(BaseModel):
     ENV_DATA_DIR: ClassVar[str] = "EVERSPRING_DATA_DIR"
     ENV_CHUNK_WORKERS: ClassVar[str] = "EVERSPRING_INDEX_CHUNK_WORKERS"
     ENV_CHROMA_UPSERT_BATCH_SIZE: ClassVar[str] = "EVERSPRING_CHROMA_UPSERT_BATCH_SIZE"
+    ENV_EMBED_TIER: ClassVar[str] = "EVERSPRING_EMBED_TIER"
+    ENV_PREFETCH_BATCHES: ClassVar[str] = "EVERSPRING_INDEX_PREFETCH_BATCHES"
 
     chroma_dir: Path = Field(
         default_factory=_default_chroma_dir,
@@ -66,18 +88,22 @@ class VectorConfig(BaseModel):
         description="ChromaDB collection name",
     )
     embedding_model: str = Field(
-        default="google/embeddinggemma-300m",
+        default=DEFAULT_MAIN_MODEL,
         min_length=1,
         description="Embedding model ID",
     )
-    max_tokens: int = Field(
-        default=512,
+    embedding_tier: str = Field(
+        default=MAIN_TIER,
+        description="Embedding model tier (main, slim, xslim)",
+    )
+    max_tokens: int | None = Field(
+        default=None,
         ge=100,
         le=2048,
         description="Max tokens per chunk (model limit is 2048)",
     )
-    overlap_tokens: int = Field(
-        default=50,
+    overlap_tokens: int | None = Field(
+        default=None,
         ge=0,
         description="Token overlap between chunks",
     )
@@ -95,6 +121,11 @@ class VectorConfig(BaseModel):
         default=512,
         ge=1,
         description="Number of vectors per Chroma upsert call",
+    )
+    prefetch_batches: int = Field(
+        default=3,
+        ge=1,
+        description="Prepared embedding batches to prefetch ahead of GPU consumption",
     )
     data_dir: Path = Field(
         default_factory=_default_data_dir,
@@ -114,6 +145,32 @@ class VectorConfig(BaseModel):
     def validate_path(cls, v: str | Path) -> Path:
         """Convert string to Path."""
         return Path(v) if isinstance(v, str) else v
+
+    @field_validator("embedding_tier")
+    @classmethod
+    def validate_embedding_tier(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in VALID_EMBEDDING_TIERS:
+            raise ValueError(
+                f"embedding_tier must be one of {sorted(VALID_EMBEDDING_TIERS)}"
+            )
+        return normalized
+
+    @model_validator(mode="before")
+    @classmethod
+    def apply_tier_chunk_defaults(cls, data: object) -> object:
+        if not isinstance(data, dict):
+            return data
+
+        tier_value = data.get("embedding_tier", MAIN_TIER)
+        normalized_tier = tier_value.strip().lower() if isinstance(tier_value, str) else MAIN_TIER
+        if normalized_tier in TIER_CHUNKING_DEFAULTS:
+            chunk_size, overlap_tokens = chunk_defaults_for_tier(normalized_tier)
+            if data.get("max_tokens") is None:
+                data["max_tokens"] = chunk_size
+            if data.get("overlap_tokens") is None:
+                data["overlap_tokens"] = overlap_tokens
+        return data
 
     @property
     def db_path(self) -> Path:
@@ -137,12 +194,16 @@ class VectorConfig(BaseModel):
             kwargs["collection_name"] = value
         if value := os.environ.get(cls.ENV_EMBED_MODEL):
             kwargs["embedding_model"] = value
+        if value := os.environ.get(cls.ENV_EMBED_TIER):
+            kwargs["embedding_tier"] = value
         if value := os.environ.get(cls.ENV_DATA_DIR):
             kwargs["data_dir"] = value
         if value := os.environ.get(cls.ENV_CHUNK_WORKERS):
             kwargs["chunk_workers"] = value
         if value := os.environ.get(cls.ENV_CHROMA_UPSERT_BATCH_SIZE):
             kwargs["chroma_upsert_batch_size"] = value
+        if value := os.environ.get(cls.ENV_PREFETCH_BATCHES):
+            kwargs["prefetch_batches"] = value
 
         return cls(**kwargs)
 
@@ -153,4 +214,4 @@ class VectorConfig(BaseModel):
         self.docs_dir.mkdir(parents=True, exist_ok=True)
 
 
-__all__ = ["VectorConfig"]
+__all__ = ["VectorConfig", "chunk_defaults_for_tier"]
