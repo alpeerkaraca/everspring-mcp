@@ -8,12 +8,13 @@ Hybrid chunking strategy:
 
 from __future__ import annotations
 
-import re
 import hashlib
+import re
 from dataclasses import dataclass
 
 from transformers import AutoTokenizer
 
+from everspring_mcp.vector.embeddings import DEFAULT_MAIN_MODEL
 
 HEADING_PATTERN = re.compile(r"^(#{1,6})\s+(.+)$")
 
@@ -29,7 +30,7 @@ CLEANUP_PATTERNS = [
 @dataclass(frozen=True)
 class MarkdownChunk:
     """Represents a chunk of markdown content."""
-    
+
     content: str
     section_path: str
     has_code: bool
@@ -38,26 +39,26 @@ class MarkdownChunk:
 
 class MarkdownChunker:
     """Chunk markdown by headings then enforce token size.
-    
+
     Uses the actual tokenizer from the embedding model to ensure accurate
     token counting and proper chunk sizing.
-    
+
     Args:
         model_name: HuggingFace model name (for tokenizer)
         max_tokens: Max tokens per chunk
         overlap_tokens: Overlap between chunks
     """
-    
+
     def __init__(
         self,
-        model_name: str = "google/embeddinggemma-300m",
+        model_name: str = DEFAULT_MAIN_MODEL,
         max_tokens: int = 512,
         overlap_tokens: int = 50,
     ) -> None:
         self.model_name = model_name
         self.max_tokens = max_tokens
         self.overlap_tokens = overlap_tokens
-        self._tokenizer = AutoTokenizer.from_pretrained(model_name)
+        self._tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
 
     def _encode_tokens(self, text: str) -> list[int]:
         return self._tokenizer.encode(
@@ -65,10 +66,10 @@ class MarkdownChunker:
             add_special_tokens=False,
             verbose=False,
         )
-    
+
     def _count_tokens(self, text: str) -> int:
         return len(self._encode_tokens(text))
-    
+
     def _clean_content(self, text: str) -> str:
         """Remove Spring docs artifacts from content."""
         result = text
@@ -77,22 +78,22 @@ class MarkdownChunker:
         # Clean up extra whitespace
         result = re.sub(r"\n{3,}", "\n\n", result)
         return result.strip()
-    
+
     def _split_by_headings(self, markdown: str) -> list[tuple[str, str]]:
         """Split markdown into sections by headings.
-        
+
         Returns list of (section_path, content).
         """
         lines = markdown.splitlines()
         sections: list[tuple[str, list[str]]] = []
         current_path: list[str] = []
         current_content: list[str] = []
-        
+
         def flush() -> None:
             if current_content:
                 sections.append((" > ".join(current_path), current_content.copy()))
                 current_content.clear()
-        
+
         for line in lines:
             match = HEADING_PATTERN.match(line.strip())
             if match:
@@ -100,17 +101,17 @@ class MarkdownChunker:
                 flush()
                 level = len(match.group(1))
                 title = match.group(2).strip()
-                
+
                 # Maintain heading hierarchy
                 current_path = current_path[: level - 1]
                 current_path.append(title)
                 current_content.append(line)
             else:
                 current_content.append(line)
-        
+
         flush()
         return [(path, "\n".join(content)) for path, content in sections]
-    
+
     def _split_by_tokens(self, text: str) -> list[str]:
         """Split text into token-limited chunks with natural boundaries."""
         tokens = self._encode_tokens(text)
@@ -160,17 +161,17 @@ class MarkdownChunker:
                 return text[: pos + len(marker)].strip()
 
         return text.strip()
-    
+
     def chunk(self, markdown: str) -> list[MarkdownChunk]:
         """Chunk markdown using hybrid strategy.
-        
+
         Returns list of MarkdownChunk objects.
         """
         # Clean content first
         cleaned = self._clean_content(markdown)
         heading_sections = self._split_by_headings(cleaned)
         chunks: list[MarkdownChunk] = []
-        
+
         for section_path, content in heading_sections:
             for piece in self._split_by_tokens(content):
                 stripped = piece.strip()
@@ -184,7 +185,7 @@ class MarkdownChunker:
                     has_code=has_code,
                     content_hash=content_hash,
                 ))
-        
+
         return chunks
 
     @staticmethod

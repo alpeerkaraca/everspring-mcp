@@ -51,7 +51,7 @@ dev = [
     "moto[s3]>=4.2.0",
 ]
 amd = [
-    "torch; sys_platform == 'linux' and platform_machine == 'x86_64' and python_version < '3.12'",
+    "torch; sys_platform == 'linux' and platform_machine == 'x86_64'",
 ]
 
 [[tool.uv.index]]
@@ -60,7 +60,7 @@ url = "https://download.pytorch.org/whl/rocm7.2"
 explicit = true
 
 [tool.uv.sources]
-torch = [{ index = "pytorch-rocm", marker = "extra == 'amd' and sys_platform == 'linux' and platform_machine == 'x86_64' and python_version < '3.12'" }]
+torch = [{ index = "pytorch-rocm", marker = "extra == 'amd' and sys_platform == 'linux' and platform_machine == 'x86_64'" }]
 
 [project.scripts]
 everspring-mcp = "everspring_mcp.mcp.server:run_server"

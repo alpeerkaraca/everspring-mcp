@@ -7,6 +7,7 @@ embeds them, and upserts into ChromaDB.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import json
 import logging
 import sys
@@ -58,12 +59,124 @@ class _PreparedDocument:
 
 
 @dataclass(frozen=True)
+class _DocumentTask:
+    id: str
+    file_path: str
+    title: str
+    module: str
+    submodule: str | None
+    major_version: int
+    minor_version: int
+
+
+@dataclass(frozen=True)
 class _VectorPayload:
     chunk_id: str
     document_id: str
     content: str
     metadata: dict[str, Any]
     embedding: list[float]
+
+
+_WORKER_CHUNKER_CACHE: dict[tuple[str, int, int], MarkdownChunker] = {}
+
+
+def _is_metadata_path(path: Path) -> bool:
+    """Check if path is a metadata JSON file, not markdown."""
+    normalized = str(path).replace("\\", "/")
+    if path.name == "metadata.json":
+        return True
+    return "/metadata/" in normalized and path.suffix == ".json"
+
+
+def _metadata_path_for(markdown_path: Path) -> Path:
+    if markdown_path.name == "document.md":
+        return markdown_path.parent / "metadata.json"
+    url_hash = markdown_path.stem
+    return markdown_path.parent / "metadata" / f"{url_hash}.json"
+
+
+def _load_metadata(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _worker_chunker(model_name: str, max_tokens: int, overlap_tokens: int) -> MarkdownChunker:
+    key = (model_name, max_tokens, overlap_tokens)
+    chunker = _WORKER_CHUNKER_CACHE.get(key)
+    if chunker is None:
+        chunker = MarkdownChunker(
+            model_name=model_name,
+            max_tokens=max_tokens,
+            overlap_tokens=overlap_tokens,
+        )
+        _WORKER_CHUNKER_CACHE[key] = chunker
+    return chunker
+
+
+def _prepare_document_worker(
+    task: _DocumentTask,
+    docs_dir: str,
+    model_name: str,
+    max_tokens: int,
+    overlap_tokens: int,
+) -> _PreparedDocument | None:
+    relative_path = Path(task.file_path)
+    if _is_metadata_path(relative_path):
+        return None
+
+    markdown_path = Path(docs_dir) / relative_path
+    if not markdown_path.exists():
+        return None
+
+    metadata_path = _metadata_path_for(markdown_path)
+    metadata = _load_metadata(metadata_path)
+    source_url = metadata.get("url") if metadata else None
+    if not source_url or not str(source_url).startswith("http"):
+        return None
+
+    content = markdown_path.read_text(encoding="utf-8")
+    chunks = _worker_chunker(model_name, max_tokens, overlap_tokens).chunk(content)
+    if not chunks:
+        return None
+
+    raw_tags = metadata.get("tags")
+    tags = [str(tag) for tag in raw_tags] if isinstance(raw_tags, list) else []
+    title = str(metadata.get("title") or task.title)
+    prepared_chunks: list[_PreparedChunk] = []
+    for i, chunk in enumerate(chunks):
+        chunk_id = f"{task.id}-{i}"
+        searchable = SearchableDocument(
+            id=chunk_id,
+            document_id=task.id,
+            chunk_index=i,
+            content=chunk.content,
+            content_hash=chunk.content_hash,
+            module=SpringModule(task.module),
+            submodule=task.submodule,
+            version_major=task.major_version,
+            version_minor=task.minor_version,
+            content_type=ContentType.REFERENCE,
+            title=title,
+            url=str(source_url),
+            section_path=chunk.section_path,
+            has_code=chunk.has_code,
+            has_deprecation=False,
+            tags=tags,
+        )
+        prepared_chunks.append(
+            _PreparedChunk(
+                chunk_id=chunk_id,
+                document_id=task.id,
+                content=chunk.content,
+                metadata=searchable.to_chroma_metadata(),
+            ),
+        )
+    return _PreparedDocument(document_id=task.id, chunks=prepared_chunks)
 
 
 class VectorIndexer:
@@ -86,6 +199,7 @@ class VectorIndexer:
         self.embedder = Embedder(
             model_name=self.config.embedding_model,
             batch_size=self.config.batch_size,
+            tier=self.config.embedding_tier,
         )
         self.chroma = ChromaClient(self.config)
         self._storage = storage
@@ -121,6 +235,9 @@ class VectorIndexer:
         chunk_workers = min(len(docs), max(1, self.config.chunk_workers))
         embed_batch_size = max(1, self.config.batch_size)
         upsert_batch_size = max(1, self.config.chroma_upsert_batch_size)
+        chunk_max_tokens = int(self.config.max_tokens)
+        chunk_overlap_tokens = int(self.config.overlap_tokens)
+        prefetch_chunks_limit = max(embed_batch_size, self.config.prefetch_batches * embed_batch_size)
 
         total_chunks = 0
         indexed_docs = 0
@@ -155,74 +272,129 @@ class VectorIndexer:
                     disable=not progress_enabled,
                 ) as chunks_bar,
             ):
-                docs_iter = iter(docs)
-                active_tasks: set[asyncio.Task[_PreparedDocument | None]] = set()
+                prepared_queue: asyncio.Queue[_PreparedDocument | None] = asyncio.Queue(
+                    maxsize=max(1, prefetch_chunks_limit // embed_batch_size),
+                )
+                loop = asyncio.get_running_loop()
+                pool = concurrent.futures.ProcessPoolExecutor(max_workers=chunk_workers)
 
-                def _schedule_next() -> bool:
-                    try:
-                        next_doc = next(docs_iter)
-                    except StopIteration:
-                        return False
-                    task = asyncio.create_task(
-                        asyncio.to_thread(self._prepare_document, next_doc),
-                    )
-                    active_tasks.add(task)
-                    return True
+                async def _flush_pending_vectors() -> tuple[int, int]:
+                    flushed_total_chunks = 0
+                    flushed_total_docs = 0
+                    while len(pending_vectors) >= upsert_batch_size:
+                        vector_batch = pending_vectors[:upsert_batch_size]
+                        del pending_vectors[:upsert_batch_size]
+                        flushed_chunks, flushed_docs = await self._flush_vector_payloads(
+                            payloads=vector_batch,
+                            doc_chunk_totals=doc_chunk_totals,
+                            doc_chunk_indexed=doc_chunk_indexed,
+                            marked_docs=marked_docs,
+                        )
+                        flushed_total_chunks += flushed_chunks
+                        flushed_total_docs += flushed_docs
+                    return flushed_total_chunks, flushed_total_docs
 
-                for _ in range(chunk_workers):
-                    if not _schedule_next():
-                        break
+                async def _consume_prepared(prepared: _PreparedDocument) -> tuple[int, int]:
+                    nonlocal heartbeat_emitted
+                    consumed_chunks = 0
+                    consumed_docs = 0
+                    doc_chunk_totals[prepared.document_id] = len(prepared.chunks)
+                    doc_chunk_indexed.setdefault(prepared.document_id, 0)
+                    pending_chunks.extend(prepared.chunks)
+                    if progress_enabled:
+                        chunks_bar.total = (chunks_bar.total or 0) + len(prepared.chunks)
+                        chunks_bar.refresh()
 
-                while active_tasks:
-                    done, _ = await asyncio.wait(
-                        active_tasks,
-                        return_when=asyncio.FIRST_COMPLETED,
-                    )
-                    for task in done:
-                        active_tasks.remove(task)
-                        prepared = task.result()
-                        docs_bar.update(1)
+                    while len(pending_chunks) >= embed_batch_size:
+                        chunk_batch = pending_chunks[:embed_batch_size]
+                        del pending_chunks[:embed_batch_size]
+                        vectors = await self._embed_with_progress(
+                            texts=[item.content for item in chunk_batch],
+                            progress_bar=chunks_bar if progress_enabled else None,
+                        )
+                        pending_vectors.extend(self._to_vector_payloads(chunk_batch, vectors))
+                        flushed_chunks, flushed_docs = await _flush_pending_vectors()
+                        consumed_chunks += flushed_chunks
+                        consumed_docs += flushed_docs
 
-                        if prepared is not None and prepared.chunks:
-                            doc_chunk_totals[prepared.document_id] = len(prepared.chunks)
-                            doc_chunk_indexed.setdefault(prepared.document_id, 0)
-                            pending_chunks.extend(prepared.chunks)
-                            if progress_enabled:
-                                chunks_bar.total = (chunks_bar.total or 0) + len(prepared.chunks)
-                                chunks_bar.refresh()
+                    if pending_vectors and not heartbeat_emitted:
+                        self._emit_finalization_heartbeat()
+                        heartbeat_emitted = True
+                    return consumed_chunks, consumed_docs
 
-                        _schedule_next()
+                async def _producer() -> None:
+                    docs_iter = iter(docs)
+                    active_tasks: set[asyncio.Future[_PreparedDocument | None]] = set()
 
-                        while len(pending_chunks) >= embed_batch_size:
-                            chunk_batch = pending_chunks[:embed_batch_size]
-                            del pending_chunks[:embed_batch_size]
-                            vectors = await self._embed_with_progress(
-                                texts=[item.content for item in chunk_batch],
-                                progress_bar=chunks_bar if progress_enabled else None,
-                            )
-                            pending_vectors.extend(
-                                self._to_vector_payloads(chunk_batch, vectors),
-                            )
-                            while len(pending_vectors) >= upsert_batch_size:
-                                vector_batch = pending_vectors[:upsert_batch_size]
-                                del pending_vectors[:upsert_batch_size]
-                                flushed_chunks, flushed_docs = await self._flush_vector_payloads(
-                                    payloads=vector_batch,
-                                    doc_chunk_totals=doc_chunk_totals,
-                                    doc_chunk_indexed=doc_chunk_indexed,
-                                    marked_docs=marked_docs,
-                                )
-                                total_chunks += flushed_chunks
-                                indexed_docs += flushed_docs
+                    def _schedule_next() -> bool:
+                        try:
+                            next_doc = next(docs_iter)
+                        except StopIteration:
+                            return False
+                        task_data = _DocumentTask(
+                            id=str(next_doc.id),
+                            file_path=str(next_doc.file_path),
+                            title=str(next_doc.title),
+                            module=str(next_doc.module),
+                            submodule=next_doc.submodule,
+                            major_version=int(next_doc.major_version),
+                            minor_version=int(next_doc.minor_version),
+                        )
+                        task = loop.run_in_executor(
+                            pool,
+                            _prepare_document_worker,
+                            task_data,
+                            str(self.config.docs_dir),
+                            self.config.embedding_model,
+                            chunk_max_tokens,
+                            chunk_overlap_tokens,
+                        )
+                        active_tasks.add(task)
+                        return True
 
-                while pending_chunks:
-                    chunk_batch = pending_chunks[:embed_batch_size]
-                    del pending_chunks[:embed_batch_size]
-                    vectors = await self._embed_with_progress(
-                        texts=[item.content for item in chunk_batch],
-                        progress_bar=chunks_bar if progress_enabled else None,
-                    )
-                    pending_vectors.extend(self._to_vector_payloads(chunk_batch, vectors))
+                    for _ in range(chunk_workers):
+                        if not _schedule_next():
+                            break
+
+                    while active_tasks:
+                        done, _ = await asyncio.wait(
+                            active_tasks,
+                            return_when=asyncio.FIRST_COMPLETED,
+                        )
+                        for task in done:
+                            active_tasks.remove(task)
+                            prepared = task.result()
+                            docs_bar.update(1)
+                            if prepared is not None and prepared.chunks:
+                                await prepared_queue.put(prepared)
+                            _schedule_next()
+
+                    await prepared_queue.put(None)
+
+                producer_task = asyncio.create_task(_producer())
+                try:
+                    while True:
+                        prepared = await prepared_queue.get()
+                        if prepared is None:
+                            break
+                        flushed_chunks, flushed_docs = await _consume_prepared(prepared)
+                        total_chunks += flushed_chunks
+                        indexed_docs += flushed_docs
+
+                    while pending_chunks:
+                        chunk_batch = pending_chunks[:embed_batch_size]
+                        del pending_chunks[:embed_batch_size]
+                        vectors = await self._embed_with_progress(
+                            texts=[item.content for item in chunk_batch],
+                            progress_bar=chunks_bar if progress_enabled else None,
+                        )
+                        pending_vectors.extend(self._to_vector_payloads(chunk_batch, vectors))
+                        flushed_chunks, flushed_docs = await _flush_pending_vectors()
+                        total_chunks += flushed_chunks
+                        indexed_docs += flushed_docs
+                finally:
+                    await producer_task
+                    pool.shutdown(wait=True, cancel_futures=True)
 
                 if pending_vectors and not heartbeat_emitted:
                     self._emit_finalization_heartbeat()
@@ -370,6 +542,7 @@ class VectorIndexer:
         texts: list[str],
         progress_bar: Any | None = None,
     ) -> list[list[float]]:
+        logger.info("Embedding batch of %d texts", len(texts))
         vectors = await self.embedder.embed_texts(texts)
         if progress_bar is not None:
             progress_bar.update(len(texts))
