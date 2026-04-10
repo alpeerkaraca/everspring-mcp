@@ -7,7 +7,22 @@
 ![AMD ROCm](https://img.shields.io/badge/AMD%20ROCm-RX%209000%20Ready-ED1C24?logo=amd&logoColor=white)
 ![Apple Silicon](https://img.shields.io/badge/Apple%20Silicon-MPS%20Fallback-A2AAAD?logo=apple&logoColor=white)
 
-## 🚀 Quickstart (3 Steps to Run)
+## 🚀 Quickstart
+
+### Option A: For Users (Recommended - Docker, Zero Config)
+
+No Python environment setup and no AWS keys are required for normal plug-and-play usage.
+
+1. **Build the image**
+   ```bash
+   docker build -t everspring-mcp:latest .
+   ```
+2. **Run MCP server (`xslim` tier)**
+   ```bash
+   docker run --name everspring-xslim --rm -i -e EVERSPRING_MODEL_TIER=xslim -e EVERSPRING_DATA_DIR=/home/everspring/.everspring -v everspring-data-xslim:/home/everspring/.everspring everspring-mcp:latest python -m everspring_mcp.main serve --tier xslim
+   ```
+
+### Option B: For Developers (Using uv)
 
 1. **Install dependencies**
    ```bash
@@ -17,10 +32,16 @@
    ```bash
    uv run python -m everspring_mcp.main sync --mode snapshot-download --snapshot-tier slim --snapshot-model BAAI/bge-base-en-v1.5
    ```
-3. **Start the MCP server**
+3. **Start MCP server**
    ```bash
    uv run python -m everspring_mcp.main serve --tier slim
    ```
+
+## ⚠️ Important Note on First Run (Timeout Prevention)
+
+On the very first run, the container can automatically download a ChromaDB/SQLite snapshot from S3 (roughly **750MB to 1.5GB** depending on tier/model). This may take longer than strict 60-second MCP startup timeout windows in some clients.
+
+To avoid connection timeouts, run the Docker command manually once in your terminal first and let the initial snapshot download complete, then configure/launch the MCP server from Claude/Copilot.
 
 EverSpring MCP is a Spring documentation ingestion, indexing, and retrieval system with an MCP server interface.  
 Primary CLI entrypoint: `python -m everspring_mcp.main`.
@@ -310,20 +331,87 @@ python -m everspring_mcp.main serve --tier main
 
 ---
 
-## Claude Desktop (`claude_desktop_config.json`)
+## 🔌 Claude Desktop Integration (`claude_desktop_config.json`)
 
 ```json
 {
   "mcpServers": {
-    "everspring-mcp": {
-      "command": "uv",
-      "args": ["run", "python", "-u", "-m", "everspring_mcp.main", "serve"],
-      "env": { "PYTHONUNBUFFERED": "1" },
-      "cwd": "C:\\\\path\\\\to\\\\everspring_mcp"
+    "everspring-main": {
+      "command": "docker",
+      "args": [
+        "run",
+        "--name",
+        "everspring-main",
+        "--rm",
+        "-i",
+        "-e",
+        "EVERSPRING_MODEL_TIER=main",
+        "-e",
+        "EVERSPRING_DATA_DIR=/home/everspring/.everspring",
+        "-v",
+        "everspring-data-main:/home/everspring/.everspring",
+        "everspring-mcp:latest",
+        "python",
+        "-m",
+        "everspring_mcp.main",
+        "serve",
+        "--tier",
+        "main"
+      ]
+    },
+    "everspring-slim": {
+      "command": "docker",
+      "args": [
+        "run",
+        "--name",
+        "everspring-slim",
+        "--rm",
+        "-i",
+        "-e",
+        "EVERSPRING_MODEL_TIER=slim",
+        "-e",
+        "EVERSPRING_DATA_DIR=/home/everspring/.everspring",
+        "-v",
+        "everspring-data-slim:/home/everspring/.everspring",
+        "everspring-mcp:latest",
+        "python",
+        "-m",
+        "everspring_mcp.main",
+        "serve",
+        "--tier",
+        "slim"
+      ]
+    },
+    "everspring-xslim": {
+      "command": "docker",
+      "args": [
+        "run",
+        "--name",
+        "everspring-xslim",
+        "--rm",
+        "-i",
+        "-e",
+        "EVERSPRING_MODEL_TIER=xslim",
+        "-e",
+        "EVERSPRING_DATA_DIR=/home/everspring/.everspring",
+        "-v",
+        "everspring-data-xslim:/home/everspring/.everspring",
+        "everspring-mcp:latest",
+        "python",
+        "-m",
+        "everspring_mcp.main",
+        "serve",
+        "--tier",
+        "xslim"
+      ]
     }
   }
 }
 ```
+
+> **Volume isolation matters:** each tier must use a different Docker volume (for example `everspring-data-slim` vs `everspring-data-xslim`) to prevent Chroma/SQLite conflicts.
+>
+> **STDIO safety:** do **not** add `-t` (TTY) to Docker args in MCP config. Keep `-i` only.
 
 Once connected, call `search_spring_docs` with:
 
@@ -331,3 +419,26 @@ Once connected, call `search_spring_docs` with:
 - `top_k` (default: `3`)
 - `module` (optional)
 - `version_major` (optional)
+
+---
+
+## 🛠 Advanced Usage: Custom Models & Enterprise S3
+
+### Bring Your Own Model (BYOM)
+
+1. **Sync raw markdown corpus only**
+   ```bash
+   uv run python -m everspring_mcp.main sync --mode manifest
+   ```
+2. **Build your own local vector DB with a custom embedding model**
+   ```bash
+   uv run python -m everspring_mcp.main index --embed-model "custom/model"
+   ```
+
+### Enterprise private S3
+
+Point the pipeline to your own S3 bucket by overriding:
+
+```bash
+export EVERSPRING_S3_BUCKET=your-enterprise-bucket
+```
