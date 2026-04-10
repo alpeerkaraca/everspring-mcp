@@ -1,0 +1,36 @@
+services:
+  everspring-slim:
+    image: everspring-mcp:latest
+    command: ["python", "-m", "everspring_mcp.main", "serve", "--tier", "slim"]
+    stdin_open: true
+    tty: false
+    environment:
+      EVERSPRING_MODEL_TIER: "slim"
+      EVERSPRING_DATA_DIR: "/home/everspring/.everspring"
+    volumes:
+      - everspring-data-slim:/home/everspring/.everspring
+
+  everspring-main:
+    image: everspring-mcp:latest
+    command: ["python", "-m", "everspring_mcp.main", "serve", "--tier", "main"]
+    stdin_open: true
+    tty: false
+    environment:
+      EVERSPRING_MODEL_TIER: "main"
+      EVERSPRING_DATA_DIR: "/home/everspring/.everspring"
+    volumes:
+      - everspring-data-main:/home/everspring/.everspring
+  everspring-xslim:
+    image: everspring-mcp:latest
+    command: ["python", "-m", "everspring_mcp.main", "serve", "--tier", "xslim"]
+    stdin_open: true
+    tty: false
+    environment:
+      EVERSPRING_MODEL_TIER: "xslim"
+      EVERSPRING_DATA_DIR: "/home/everspring/.everspring"
+    volumes:
+      - everspring-data-xslim:/home/everspring/.everspring
+volumes:
+  everspring-data-slim:
+  everspring-data-main:
+  everspring-data-xslim:

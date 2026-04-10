@@ -73,7 +73,3 @@ logs/
 *.mcp
 **/.playwright-mcp/**
 
-# lock
-uv.lock
-uv.lock
-uv.lock

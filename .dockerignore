@@ -1,0 +1,40 @@
+# VCS metadata
+.git
+.gitignore
+
+# Python caches/artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+
+# Virtual environments
+.venv/
+venv/
+
+# Local runtime/state
+logs/
+data/
+*.db
+*.sqlite
+*.sqlite3
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Editors and local tooling
+.vscode/
+.idea/
+.copilot/
+.env
+.env.*
+
+# Non-runtime project directories
+tests/
+infrastructure/
+scripts/
