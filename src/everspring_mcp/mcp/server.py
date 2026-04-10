@@ -15,12 +15,17 @@ from mcp.server import NotificationOptions, Server
 from mcp.server.stdio import stdio_server
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from everspring_mcp.mcp.models import (
+    ProgressNotification,
+    SearchParameters,
+    SearchStatus,
+    StructuredErrorResponse,
+)
+from everspring_mcp.mcp.tools import SpringDocsTool
 from everspring_mcp.models.metadata import SearchResult
 from everspring_mcp.utils.logging import get_logger
 from everspring_mcp.vector.config import VectorConfig
 from everspring_mcp.vector.retriever import HybridRetriever
-from everspring_mcp.mcp.models import ProgressNotification, SearchParameters, SearchStatus
-from everspring_mcp.mcp.tools import SpringDocsTool
 
 logger = get_logger("mcp.server")
 
@@ -270,18 +275,40 @@ class MCPServer:
         return "\n".join(lines).strip()
 
     @staticmethod
-    def _format_runtime_error(error: Exception) -> str:
-        return (
-            "Search is currently unavailable because local retrieval data is missing "
-            "or not readable.\n\n"
-            f"**Error:** `{type(error).__name__}: {error}`\n\n"
-            "Run local sync/index flows (including BM25 build) and retry."
+    def _format_runtime_error(error: Exception) -> StructuredErrorResponse:
+        return StructuredErrorResponse(
+            error_type="runtime_unavailable",
+            message=(
+                "Search is currently unavailable because local retrieval data is "
+                "missing or not readable."
+            ),
+            resolution_hints=[
+                "Run local sync/index flows (including BM25 build).",
+                "Verify Chroma and SQLite snapshot files exist and are readable.",
+                "Retry the same query after local data is restored.",
+            ],
+            context={
+                "exception_type": type(error).__name__,
+                "exception_message": str(error),
+            },
         )
 
     @staticmethod
-    def _error_result(message: str) -> types.CallToolResult:
+    def _serialize_structured_error(error: StructuredErrorResponse) -> str:
+        """Serialize structured error payload for MCP text transport."""
+        return error.model_dump_json(indent=2)
+
+    @classmethod
+    def _error_result(
+        cls, message: str | StructuredErrorResponse
+    ) -> types.CallToolResult:
+        payload = (
+            cls._serialize_structured_error(message)
+            if isinstance(message, StructuredErrorResponse)
+            else message
+        )
         return types.CallToolResult(
-            content=[types.TextContent(type="text", text=message)],
+            content=[types.TextContent(type="text", text=payload)],
             isError=True,
         )
 
@@ -298,8 +325,36 @@ class MCPServer:
                 self._format_runtime_error(self._runtime.preheat_error),
             )
 
-        retriever = self._ensure_retriever()
         try:
+            status = await self._tool.get_status()
+            available_modules = [module.name for module in status.modules]
+            if (
+                params.module
+                and available_modules
+                and params.module not in available_modules
+            ):
+                return self._error_result(
+                    StructuredErrorResponse(
+                        error_type="invalid_module",
+                        message=(
+                            f"Module '{params.module}' is not available in the current index."
+                        ),
+                        resolution_hints=[
+                            "Use one of the available modules from context.available_modules.",
+                            "Run sync/index to refresh local data if the module should exist.",
+                            "Retry without module filter to inspect broader results.",
+                        ],
+                        context={
+                            "requested_module": params.module,
+                            "available_modules": available_modules,
+                            "available_versions_by_module": {
+                                module.name: module.versions
+                                for module in status.modules
+                            },
+                        },
+                    )
+                )
+
             search_params = SearchParameters(
                 query=params.query,
                 top_k=params.top_k,
@@ -309,9 +364,24 @@ class MCPServer:
             response = await self._tool.search(search_params)
 
             if response.status == SearchStatus.ERROR:
-                return self._error_result(response.message)
+                return self._error_result(
+                    StructuredErrorResponse(
+                        error_type="search_error",
+                        message=response.message,
+                        resolution_hints=[
+                            "Check module/version filters for typos or unsupported values.",
+                            "Run local sync/index flows to refresh retrieval data.",
+                            "Retry with a broader query and fewer filters.",
+                        ],
+                        context={
+                            "query": params.query,
+                            "module": params.module,
+                            "version_major": params.version_major,
+                        },
+                    )
+                )
             lines = [
-                f"## Spring Docs Search Results",
+                "## Spring Docs Search Results",
                 f"**Status:** {response.message}",
                 "",
             ]

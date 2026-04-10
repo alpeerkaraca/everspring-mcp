@@ -8,12 +8,12 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class SearchStatus(str, Enum):
     """Status of a search operation."""
-    
+
     SUCCESS = "success"
     NO_RESULTS = "no_results"
     BELOW_THRESHOLD = "below_threshold"
@@ -22,7 +22,7 @@ class SearchStatus(str, Enum):
 
 class SearchParameters(BaseModel):
     """Parameters for Spring documentation search."""
-    
+
     query: str = Field(
         min_length=3,
         max_length=500,
@@ -58,7 +58,7 @@ class SearchParameters(BaseModel):
 
 class SearchResultItem(BaseModel):
     """A single search result item."""
-    
+
     rank: int = Field(
         ge=1,
         description="Ranking position (1 is best)",
@@ -97,7 +97,7 @@ class SearchResultItem(BaseModel):
 
 class SearchResponse(BaseModel):
     """Response from a search operation."""
-    
+
     status: SearchStatus = Field(
         description="Status of the search operation",
     )
@@ -134,7 +134,7 @@ class SearchResponse(BaseModel):
 
 class ProgressNotification(BaseModel):
     """Progress notification during search operations."""
-    
+
     stage: str = Field(
         description="Current processing stage",
     )
@@ -154,7 +154,7 @@ class ProgressNotification(BaseModel):
 
 class ModuleInfo(BaseModel):
     """Information about available modules."""
-    
+
     name: str = Field(
         description="Module name",
     )
@@ -173,7 +173,7 @@ class ModuleInfo(BaseModel):
 
 class StatusResponse(BaseModel):
     """Server status response."""
-    
+
     healthy: bool = Field(
         description="Whether server is healthy",
     )
@@ -193,6 +193,29 @@ class StatusResponse(BaseModel):
     )
 
 
+class StructuredErrorResponse(BaseModel):
+    """Structured MCP error payload for LLM auto-correction flows."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    error_type: str = Field(
+        min_length=1,
+        description="Stable machine-readable error category",
+    )
+    message: str = Field(
+        min_length=1,
+        description="Human-readable summary of the error",
+    )
+    resolution_hints: list[str] = Field(
+        default_factory=list,
+        description="Actionable next steps to resolve the error",
+    )
+    context: dict[str, Any] | None = Field(
+        default=None,
+        description="Optional structured context for correction hints/options",
+    )
+
+
 __all__ = [
     "SearchStatus",
     "SearchParameters",
@@ -201,4 +224,5 @@ __all__ = [
     "ProgressNotification",
     "ModuleInfo",
     "StatusResponse",
+    "StructuredErrorResponse",
 ]
