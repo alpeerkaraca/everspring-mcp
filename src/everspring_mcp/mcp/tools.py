@@ -6,6 +6,7 @@ progress notifications, and module/version filtering.
 
 from __future__ import annotations
 
+import asyncio
 import time
 from collections import defaultdict
 from collections.abc import Callable
@@ -69,6 +70,7 @@ class SpringDocsTool:
         self._retriever: HybridRetriever | None = None
         self._chroma: ChromaClient | None = None
         self._initialized = False
+        self._cached_status: StatusResponse | None = None
         logger.info(f"SpringDocsTool initialized in {time.perf_counter() - start:.3f}s")
 
     def _notify_progress(
@@ -139,6 +141,7 @@ class SpringDocsTool:
                 100.0,
             )
             logger.info(f"Full tool initialization in {time.perf_counter() - start:.2f}s")
+            logger.info("------------------------------------------------------------------------------\nFULLY INITIALIZED: SpringDocsTool is ready to handle search requests")
             return True
 
         except Exception as e:
@@ -356,69 +359,63 @@ class SpringDocsTool:
         )
 
     async def get_status(self) -> StatusResponse:
-        """Get server/index status.
-
-        Returns:
-            StatusResponse with index health info
-        """
         if not self._initialized:
             await self.initialize()
 
-        if not self._chroma:
-            return StatusResponse(
-                healthy=False,
-                index_ready=False,
-                total_documents=0,
-                bm25_index_loaded=False,
-            )
+        # EĞER DAHA ÖNCE HESAPLANDIYSA DİREKT CACHE'DEN DÖN (0 milisaniye sürer!)
+        if self._cached_status:
+            return self._cached_status
 
-        try:
+        if not self._chroma:
+            return StatusResponse(healthy=False, index_ready=False, total_documents=0, bm25_index_loaded=False)
+
+        # Ağır veritabanı taramasını Event Loop'u kilitlememesi için ayrı thread'e yolluyoruz
+        def _compute_status():
             collection = self._chroma.get_collection()
             total_docs = collection.count()
-
-            # Get unique modules and versions
-            all_docs = collection.get(include=["metadatas"])
-            module_data: dict[str, dict[str, Any]] = defaultdict(
-                lambda: {"versions": set(), "submodules": set(), "count": 0}
-            )
-
-            if all_docs["metadatas"]:
-                for meta in all_docs["metadatas"]:
+            module_data = defaultdict(lambda: {"versions": set(), "submodules": set(), "count": 0})
+            
+            batch_size = 1000
+            offset = 0
+            while offset < total_docs:
+                batch_docs = collection.get(include=["metadatas"], limit=batch_size, offset=offset)
+                if not batch_docs["metadatas"]:
+                    break
+                for meta in batch_docs["metadatas"]:
                     mod = meta.get("module", "unknown")
                     module_data[mod]["versions"].add(meta.get("version_major", 0))
                     if meta.get("submodule"):
                         module_data[mod]["submodules"].add(meta.get("submodule"))
                     module_data[mod]["count"] += 1
-
+                offset += batch_size
+                
             modules = [
                 ModuleInfo(
                     name=name,
                     versions=sorted(data["versions"]),
                     submodules=sorted(data["submodules"]),
-                    doc_count=data["count"],
+                    doc_count=data["count"]
                 )
                 for name, data in sorted(module_data.items())
             ]
+            return total_docs, modules
 
+        try:
+            total_docs, modules = await asyncio.to_thread(_compute_status)
             bm25_loaded = self._retriever.ensure_bm25_index() if self._retriever else False
-
-            return StatusResponse(
+            
+            self._cached_status = StatusResponse(
                 healthy=True,
                 index_ready=total_docs > 0,
                 modules=modules,
                 total_documents=total_docs,
                 bm25_index_loaded=bm25_loaded,
             )
-
+            return self._cached_status
+            
         except Exception as e:
             logger.error(f"Status check failed: {e}")
-            return StatusResponse(
-                healthy=False,
-                index_ready=False,
-                total_documents=0,
-                bm25_index_loaded=False,
-            )
-
+            return StatusResponse(healthy=False, index_ready=False, total_documents=0, bm25_index_loaded=False)
     async def list_available_modules(self) -> list[str]:
         """Get list of available modules.
 

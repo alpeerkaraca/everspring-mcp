@@ -1,7 +1,7 @@
 services:
   everspring-slim:
     image: everspring-mcp:latest
-    command: ["python", "-m", "everspring_mcp.main", "serve", "--tier", "slim"]
+    command: ["python", "-m", "everspring_mcp.main", "serve", "--tier", "slim", "--transport", "stdio"]
     stdin_open: true
     tty: false
     environment:
@@ -12,7 +12,7 @@ services:
 
   everspring-main:
     image: everspring-mcp:latest
-    command: ["python", "-m", "everspring_mcp.main", "serve", "--tier", "main"]
+    command: ["python", "-m", "everspring_mcp.main", "serve", "--tier", "main", "--transport", "stdio"]
     stdin_open: true
     tty: false
     environment:
@@ -22,7 +22,7 @@ services:
       - everspring-data-main:/home/everspring/.everspring
   everspring-xslim:
     image: everspring-mcp:latest
-    command: ["python", "-m", "everspring_mcp.main", "serve", "--tier", "xslim"]
+    command: ["python", "-m", "everspring_mcp.main", "serve", "--tier", "xslim", "--transport", "stdio"]
     stdin_open: true
     tty: false
     environment:

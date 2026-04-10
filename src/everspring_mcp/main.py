@@ -544,13 +544,13 @@ def _build_parser() -> argparse.ArgumentParser:
 
     serve = subparsers.add_parser(
         "serve",
-        help="Run MCP server (stdio transport)",
+        help="Run MCP server",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     serve.add_argument(
         "--transport",
         default="stdio",
-        choices=["stdio"],
+        choices=["stdio", "http"],
         help="MCP transport type",
     )
     serve.add_argument(
@@ -1239,10 +1239,14 @@ async def _run_serve(args: argparse.Namespace) -> int:
     else:
         logger.info(f"Starting {server.name} MCP server...")
 
-    if args.transport != "stdio":
+    if args.transport == "stdio":
+        logger.info("Using stdio transport")
+        await server.serve_stdio()
+    elif args.transport == "http":
+        logger.info("Using HTTP transport")
+        await server.serve_http()
+    else:
         raise SystemExit(f"Unsupported transport: {args.transport}")
-
-    await server.serve_stdio()
 
     return 0
 
