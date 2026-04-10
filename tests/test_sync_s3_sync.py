@@ -474,6 +474,46 @@ async def test_find_latest_snapshot_pair_falls_back_to_spring_docs_prefix(
 
 
 @pytest.mark.asyncio
+async def test_find_latest_snapshot_pair_prefers_namespaced_scope_over_root_fallback(
+    mock_s3: Any,
+    sync_config: SyncConfig,
+) -> None:
+    """Namespaced snapshot keys must win over newer root-level fallback keys."""
+    mismatch_config = sync_config.model_copy(update={"s3_prefix": "docs"})
+    service = S3SyncService(mismatch_config, s3_client=mock_s3)
+
+    namespaced_prefix = "spring-docs/db-snapshots/bge-m3-main"
+    root_prefix = "spring-docs/db-snapshots"
+
+    # Correct namespace snapshot pair (older token).
+    namespaced_chroma = f"{namespaced_prefix}/chroma_db_2026_04_07.zip"
+    namespaced_sqlite = f"{namespaced_prefix}/sqlite_metadata_2026_04_07.zip"
+    # Root fallback pair with newer token should be ignored when namespace exists.
+    root_chroma = f"{root_prefix}/chroma_db_2026_04_09.zip"
+    root_sqlite = f"{root_prefix}/sqlite_metadata_2026_04_09.zip"
+
+    for key, payload in (
+        (namespaced_chroma, _zip_bytes({"spring_docs/index.bin": b"namespaced-chroma"})),
+        (namespaced_sqlite, _zip_bytes({sync_config.db_filename: b"namespaced-sqlite"})),
+        (root_chroma, _zip_bytes({"spring_docs/index.bin": b"root-chroma"})),
+        (root_sqlite, _zip_bytes({sync_config.db_filename: b"root-sqlite"})),
+    ):
+        mock_s3.put_object(
+            Bucket=sync_config.s3_bucket,
+            Key=key,
+            Body=payload,
+            ContentType="application/zip",
+            Metadata={"content-hash": compute_hash(payload)},
+        )
+
+    selection = await service.find_latest_snapshot_pair()
+
+    assert selection.snapshot_token == "2026_04_07"
+    assert selection.chroma_key == namespaced_chroma
+    assert selection.sqlite_key == namespaced_sqlite
+
+
+@pytest.mark.asyncio
 async def test_download_latest_db_snapshots_applies_and_cleans_archives(
     mock_s3: Any,
     sync_config: SyncConfig,

@@ -6,10 +6,12 @@ Use `uv` for local workflows.
 
 | Task | Command |
 | --- | --- |
+| Install dependencies | `uv sync` |
 | Install dependencies (including dev tools) | `uv sync --dev` |
 | Build package artifact | `uv build` |
 | Lint | `uv run ruff check src tests` |
-| Lint one file | `uv run ruff check src\everspring_mcp\sync\s3_sync.py` |
+| Lint one file | `uv run ruff check src\everspring_mcp\mcp\server.py` |
+| Format code | `uv run ruff format src tests` |
 | Type-check | `uv run mypy src` |
 | Run full test suite | `uv run pytest -q` |
 | Run one test file | `uv run pytest tests\test_vector_indexer.py -q` |
@@ -36,20 +38,22 @@ Use `uv` for local workflows.
   4. SQLite updates via `StorageManager`.
 - `sync --mode manifest-prime` pre-generates/uploads missing manifests.
 - `sync --mode snapshot-upload` uploads local SQLite/Chroma snapshots to `spring-docs/db-snapshots/`.
+- `sync --mode snapshot-download` restores the latest matching SQLite/Chroma snapshot pair for search-node startup.
 
 ### 3. Indexing pipeline (local docs -> Chroma vectors + BM25 corpus)
 - CLI entry: `python -m everspring_mcp.main index`.
 - `VectorIndexer` (`src\everspring_mcp\vector\indexer.py`) reads unindexed docs from SQLite, chunks markdown, embeds chunks, upserts into Chroma, then marks docs indexed.
+- Indexing is a producer-consumer pipeline: chunk preparation runs in a `ProcessPoolExecutor`, staged in `pending_chunks`, then embedded/upserted in configured batches.
 - Chunking and embedding are model-aware:
   - `MarkdownChunker` uses tokenizer-based limits.
   - `Embedder` enforces `max_seq_length` safety before `SentenceTransformer.encode(...)`.
-- Hybrid retrieval uses:
-  - Dense Chroma search + sparse BM25 (`BM25Index`)
-  - Reciprocal Rank Fusion in `HybridRetriever` (`src\everspring_mcp\vector\retriever.py`).
 
-### 4. MCP serving layer
-- `MCPServer` (`src\everspring_mcp\mcp\server.py`) exposes `search_spring_docs`, `get_spring_docs_status`, and `list_spring_modules`.
-- `SpringDocsTool` (`src\everspring_mcp\mcp\tools.py`) adds progress events and score-threshold filtering on top of `HybridRetriever`.
+### 4. Retrieval + MCP serving
+- `HybridRetriever` (`src\everspring_mcp\vector\retriever.py`) handles retrieval:
+  - `tier=main`: dense-only path.
+  - `tier=slim`/`tier=xslim`: dense Chroma + sparse BM25 fused by Reciprocal Rank Fusion (`RRF_K=60`).
+- `MCPServer` (`src\everspring_mcp\mcp\server.py`) is SDK-native (`mcp.server.Server`) and publishes one MCP tool: `search_spring_docs`.
+- The server uses late initialization and startup preheating in lifespan hooks (`prefetch_model()` + `ensure_bm25_index()`) to avoid first-query cold starts.
 
 ## Key conventions for this repository
 
@@ -83,6 +87,16 @@ Use `uv` for local workflows.
    - `content-hash` metadata is used to avoid unnecessary upload/download work.
    - Download/upload retry policy uses tenacity with exponential backoff.
 
-8. **Hybrid search filtering expectations**
+8. **Producer-consumer batching is performance-critical**
+   - Keep `pending_chunks` buffering, chunk workers, embedding batching, and Chroma upsert batching intact.
+   - Do not regress to document-by-document synchronous indexing.
+   - Keep mark-indexed behavior coupled to successful vector writes.
+
+9. **Hybrid search filtering and tier behavior**
    - Module/version filters are applied before ranking/scoring in dense and sparse paths.
    - URL deduplication is enabled by default in retrieval.
+   - BM25/RRF apply to `slim`/`xslim`; `main` tier uses dense-only retrieval by design.
+
+10. **MCP stdio output discipline**
+    - Do not use `print()` in the MCP serve path.
+    - Emit logs through the project logger (`everspring_mcp.utils.logging`) so stdout stays valid JSON-RPC traffic.

@@ -18,7 +18,7 @@ import threading
 import time
 import zipfile
 from datetime import UTC, date, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
 import boto3
@@ -372,16 +372,51 @@ class S3SyncService:
 
         except Exception:
             # Remove partially activated new data before restoring backups.
-            self._remove_path(live_db)
-            self._remove_path(live_chroma)
+            cleanup_failures: list[str] = []
+            for path in (live_db, live_chroma):
+                try:
+                    self._remove_path(path)
+                except Exception as cleanup_exc:  # pragma: no cover - rare lock/path failures
+                    cleanup_failures.append(f"cleanup {path}: {cleanup_exc}")
             if bm25_replaced:
-                self._remove_path(live_bm25)
+                try:
+                    self._remove_path(live_bm25)
+                except Exception as cleanup_exc:  # pragma: no cover - rare lock/path failures
+                    cleanup_failures.append(f"cleanup {live_bm25}: {cleanup_exc}")
+
+            rollback_failures: list[str] = []
             if db_backed_up and db_backup.exists():
-                db_backup.replace(live_db)
+                try:
+                    db_backup.replace(live_db)
+                except Exception as rollback_exc:
+                    rollback_failures.append(f"restore {db_backup} -> {live_db}: {rollback_exc}")
             if chroma_backed_up and chroma_backup.exists():
-                shutil.move(str(chroma_backup), str(live_chroma))
+                try:
+                    shutil.move(str(chroma_backup), str(live_chroma))
+                except Exception as rollback_exc:
+                    rollback_failures.append(
+                        f"restore {chroma_backup} -> {live_chroma}: {rollback_exc}"
+                    )
             if bm25_backed_up and bm25_backup.exists():
-                bm25_backup.replace(live_bm25)
+                try:
+                    bm25_backup.replace(live_bm25)
+                except Exception as rollback_exc:
+                    rollback_failures.append(
+                        f"restore {bm25_backup} -> {live_bm25}: {rollback_exc}"
+                    )
+
+            if cleanup_failures:
+                logger.warning(
+                    "Snapshot activation cleanup had %d failure(s): %s",
+                    len(cleanup_failures),
+                    "; ".join(cleanup_failures),
+                )
+            if rollback_failures:
+                logger.error(
+                    "Snapshot rollback had %d failure(s): %s",
+                    len(rollback_failures),
+                    "; ".join(rollback_failures),
+                )
             raise
         else:
             self._remove_path(db_backup)
@@ -651,6 +686,31 @@ class S3SyncService:
             snapshot_namespace=snapshot_namespace,
             tier=effective_tier,
         )
+        if objects:
+            scored_objects: list[tuple[dict[str, Any], int]] = [
+                (
+                    obj,
+                    self._snapshot_scope_rank(
+                        key=str(obj.get("Key", "")),
+                        snapshot_namespace=snapshot_namespace,
+                        tier=effective_tier,
+                    ),
+                )
+                for obj in objects
+            ]
+            preferred_rank = max((rank for _, rank in scored_objects), default=0)
+            if preferred_rank > 0:
+                filtered_objects = [obj for obj, rank in scored_objects if rank == preferred_rank]
+                if len(filtered_objects) < len(objects):
+                    logger.info(
+                        "Snapshot discovery narrowed candidates to %d/%d objects "
+                        "(namespace=%s, rank=%d)",
+                        len(filtered_objects),
+                        len(objects),
+                        snapshot_namespace,
+                        preferred_rank,
+                    )
+                objects = filtered_objects
         chroma_by_token: dict[str, dict[str, Any]] = {}
         sqlite_by_token: dict[str, dict[str, Any]] = {}
 
@@ -720,12 +780,46 @@ class S3SyncService:
             sqlite_size_bytes=int(sqlite_obj.get("Size", 0)),
         )
         logger.info(
-            "Selected snapshot pair %s (%s, %s)",
+            "Selected snapshot pair %s (%s, %s) in namespace %s",
             selection.snapshot_token,
             selection.chroma_name,
             selection.sqlite_name,
+            selection.snapshot_namespace,
         )
         return selection
+
+    def _snapshot_scope_rank(
+        self,
+        key: str,
+        snapshot_namespace: str,
+        tier: str,
+    ) -> int:
+        """Rank snapshot object key scope for namespace-safe selection.
+
+        Returns:
+            2 if key is under .../db-snapshots/{snapshot_namespace}/...
+            1 if key is under .../db-snapshots/{tier}/... (legacy tier namespace)
+            0 otherwise (root/no-namespace legacy fallback)
+        """
+        normalized_key = key.strip().strip("/")
+        if not normalized_key:
+            return 0
+        parts = [part.lower() for part in PurePosixPath(normalized_key).parts]
+        snapshots_segment = self.config.db_snapshots_subprefix.strip().lower()
+        namespace_segment = snapshot_namespace.strip().lower()
+        tier_segment = tier.strip().lower()
+        for idx, part in enumerate(parts):
+            if part != snapshots_segment:
+                continue
+            if idx + 1 >= len(parts):
+                return 0
+            scope_segment = parts[idx + 1]
+            if scope_segment == namespace_segment:
+                return 2
+            if scope_segment == tier_segment:
+                return 1
+            return 0
+        return 0
 
     def _snapshot_prefix_candidates(self, snapshot_namespace: str, tier: str) -> list[str]:
         """Build candidate snapshot prefixes, including compatibility fallbacks."""

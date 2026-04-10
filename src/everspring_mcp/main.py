@@ -19,6 +19,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from chromadb.errors import InvalidArgumentError
+
 from everspring_mcp.models.content import ContentType
 from everspring_mcp.models.spring import SpringModule, SpringVersion
 from everspring_mcp.scraper.pipeline import PipelineConfig, ScraperPipeline
@@ -139,8 +141,11 @@ async def _auto_refresh_runtime_snapshots(
         return
 
     namespace = sync_config.get_snapshot_namespace(model_name=model_name, tier=tier)
+    selected_state = (
+        f"{selection.snapshot_token}|{selection.chroma_key}|{selection.sqlite_key}"
+    )
     state = _load_snapshot_state(data_dir)
-    if state.get(namespace) == selection.snapshot_token:
+    if state.get(namespace) == selected_state:
         return
 
     async with SyncOrchestrator(sync_config, s3_service=service) as orchestrator:
@@ -156,7 +161,7 @@ async def _auto_refresh_runtime_snapshots(
         )
         return
 
-    state[namespace] = download_result.snapshot_token
+    state[namespace] = selected_state
     _save_snapshot_state(data_dir, state)
     logger.info(
         "Applied newer snapshot %s for %s; restarting process",
@@ -1129,13 +1134,26 @@ async def _run_search(args: argparse.Namespace) -> int:
         retriever.build_bm25_index()
 
     # Run search
-    results = await retriever.search(
-        query=args.query,
-        top_k=args.top_k,
-        module=args.module,
-        version_major=args.version,
-        deduplicate_urls=not args.no_dedup,
-    )
+    try:
+        results = await retriever.search(
+            query=args.query,
+            top_k=args.top_k,
+            module=args.module,
+            version_major=args.version,
+            deduplicate_urls=not args.no_dedup,
+        )
+    except InvalidArgumentError as exc:
+        error_text = str(exc)
+        if "dimension" in error_text.lower():
+            raise SystemExit(
+                "Embedding dimension mismatch detected between the selected tier/model and "
+                "the local Chroma snapshot. Stop other processes using "
+                f"'{config.chroma_dir}', then run:\n"
+                f"  python -m everspring_mcp.main sync --mode snapshot-download "
+                f"--snapshot-model \"{config.embedding_model}\" --snapshot-tier {config.embedding_tier}\n"
+                "After sync completes, rerun the search command."
+            ) from exc
+        raise
 
     if args.json:
         output = [

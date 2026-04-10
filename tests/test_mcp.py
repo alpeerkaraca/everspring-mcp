@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from everspring_mcp.mcp.client import MCPClient
+from everspring_mcp.mcp.terminal_search import LocalSearchCLI
 from everspring_mcp.mcp.models import (
     ProgressNotification,
     SearchParameters,
@@ -425,7 +425,7 @@ class TestMCPClient:
     @pytest.mark.asyncio
     async def test_format_results(self):
         """Format results for display."""
-        client = MCPClient(show_progress=False)
+        client = LocalSearchCLI(show_progress=False)
 
         response = SearchResponse(
             status=SearchStatus.SUCCESS,
@@ -459,7 +459,7 @@ class TestMCPClient:
     @pytest.mark.asyncio
     async def test_format_status(self):
         """Format status for display."""
-        client = MCPClient(show_progress=False)
+        client = LocalSearchCLI(show_progress=False)
 
         status = StatusResponse(
             healthy=True,
@@ -483,7 +483,7 @@ class TestMCPIntegration:
     @pytest.mark.skip(reason="Requires ChromaDB with indexed data")
     async def test_end_to_end_search(self):
         """Full search flow from client to tool."""
-        client = MCPClient()
+        client = LocalSearchCLI(show_progress=False)
         await client.initialize()
 
         response = await client.search(
