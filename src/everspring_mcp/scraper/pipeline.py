@@ -705,8 +705,10 @@ class ScraperPipeline:
                         stored_content_hash or not_modified_signal.content_hash,
                     )
 
-                await browser.navigate_with_retry(target.url)
-                raw_html = await browser.get_html()
+                raw_html = await browser.get_html_with_fallback(
+                    target.url,
+                    content_selectors=self.config.parser_config.content_selectors,
+                )
 
             logger.debug(f"Retrieved HTML: {len(raw_html)} chars")
 

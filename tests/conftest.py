@@ -359,6 +359,7 @@ def mock_browser(
     browser.fast_precheck = AsyncMock(return_value=None)
     browser.last_precheck_hash = None
     browser.get_html = AsyncMock(return_value=sample_spring_html)
+    browser.get_html_with_fallback = AsyncMock(return_value=sample_spring_html)
     browser.get_content = AsyncMock(return_value="Spring Boot Reference Documentation")
     browser.is_launched = True
     browser.current_url = "https://docs.spring.io/spring-boot/reference/"

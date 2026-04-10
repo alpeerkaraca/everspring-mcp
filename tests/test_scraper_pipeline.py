@@ -530,6 +530,7 @@ class TestScraperPipeline:
         assert result.content_hash == existing_content_hash
         mock_browser.navigate_with_retry.assert_not_awaited()
         mock_browser.get_html.assert_not_awaited()
+        mock_browser.get_html_with_fallback.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_scrape_url_failure(
@@ -544,7 +545,7 @@ class TestScraperPipeline:
         mock_browser = AsyncMock()
         mock_browser.__aenter__ = AsyncMock(return_value=mock_browser)
         mock_browser.__aexit__ = AsyncMock(return_value=None)
-        mock_browser.navigate_with_retry = AsyncMock(
+        mock_browser.get_html_with_fallback = AsyncMock(
             side_effect=NavigationError("Connection failed")
         )
 

@@ -3,10 +3,16 @@
 from __future__ import annotations
 
 from typing import Any
+from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 
-from everspring_mcp.scraper.browser import BrowserConfig, NotModifiedSignal, SpringBrowser
+from everspring_mcp.scraper.browser import (
+    BrowserConfig,
+    NotModifiedSignal,
+    SpringBrowser,
+)
 from everspring_mcp.scraper.exceptions import NavigationError
 
 
@@ -16,6 +22,17 @@ class _FakeHttpxResponse:
     def __init__(self, status_code: int, text: str) -> None:
         self.status_code = status_code
         self.text = text
+
+    def raise_for_status(self) -> None:
+        if self.status_code < 400:
+            return
+        request = httpx.Request("GET", "https://docs.spring.io/")
+        response = httpx.Response(self.status_code, request=request)
+        raise httpx.HTTPStatusError(
+            message=f"HTTP {self.status_code}",
+            request=request,
+            response=response,
+        )
 
 
 class _FakeAsyncClient:
@@ -191,3 +208,58 @@ async def test_navigate_with_retry_does_not_retry_non_transient_navigation_error
 
     assert attempts["navigate"] == 1
     assert attempts["rotate"] == 0
+
+
+@pytest.mark.asyncio
+async def test_get_html_with_fallback_returns_static_html_when_sufficient() -> None:
+    """Static fetch should be used when strong content selectors are present."""
+    browser = SpringBrowser()
+    static_html = "<html><body><main><h1>Docs</h1><p>Spring content</p></main></body></html>"
+    browser._fetch_html_httpx = AsyncMock(return_value=static_html)  # type: ignore[method-assign]
+    browser.navigate_with_retry = AsyncMock()
+    browser.get_html = AsyncMock(return_value="rendered-html")
+
+    html = await browser.get_html_with_fallback(
+        "https://docs.spring.io/spring-boot/reference/",
+        content_selectors=["main.content", "main"],
+    )
+
+    assert html == static_html
+    browser.navigate_with_retry.assert_not_awaited()
+    browser.get_html.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_get_html_with_fallback_falls_back_when_static_html_is_insufficient() -> None:
+    """Static HTML without strong content should trigger Playwright fallback."""
+    browser = SpringBrowser()
+    browser._fetch_html_httpx = AsyncMock(return_value="<html><body><div id='app'></div></body></html>")  # type: ignore[method-assign]
+    browser.navigate_with_retry = AsyncMock(return_value=_FakeNavigateResponse())
+    browser.get_html = AsyncMock(return_value="<html><body><main>Rendered docs</main></body></html>")
+
+    html = await browser.get_html_with_fallback(
+        "https://docs.spring.io/spring-framework/reference/",
+        content_selectors=[".docs-main"],
+    )
+
+    assert "Rendered docs" in html
+    browser.navigate_with_retry.assert_awaited_once()
+    browser.get_html.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_get_html_with_fallback_falls_back_when_static_fetch_fails() -> None:
+    """httpx fetch failures should gracefully fallback to Playwright path."""
+    browser = SpringBrowser()
+    browser._fetch_html_httpx = AsyncMock(return_value=None)  # type: ignore[method-assign]
+    browser.navigate_with_retry = AsyncMock(return_value=_FakeNavigateResponse())
+    browser.get_html = AsyncMock(return_value="<html><body><article>Rendered fallback</article></body></html>")
+
+    html = await browser.get_html_with_fallback(
+        "https://docs.spring.io/spring-security/reference/",
+        content_selectors=["main", "article"],
+    )
+
+    assert "Rendered fallback" in html
+    browser.navigate_with_retry.assert_awaited_once()
+    browser.get_html.assert_awaited_once()

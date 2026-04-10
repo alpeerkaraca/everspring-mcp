@@ -70,6 +70,11 @@ USER_AGENTS: list[str] = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0",
 ]
 
+STATIC_FETCH_BASE_HEADERS: dict[str, str] = {
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+}
+
 # Fast-path regex extraction for core content blocks before Playwright rendering.
 MAIN_CONTENT_REGEX = re.compile(
     r"<main\b[^>]*>(?P<content>.*?)</main>",
@@ -146,6 +151,12 @@ class BrowserConfig(BaseModel):
         le=30000,
         description="HTTP precheck timeout in milliseconds",
     )
+    static_fetch_timeout_ms: int = Field(
+        default=8000,
+        ge=500,
+        le=45000,
+        description="Timeout for static HTML fetch before Playwright fallback",
+    )
 
 
 class NotModifiedSignal(BaseModel):
@@ -195,8 +206,10 @@ class SpringBrowser:
         self._last_precheck_hash: str | None = None
 
     async def __aenter__(self) -> Self:
-        """Enter async context and launch browser."""
-        await self._launch()
+        """Enter async context.
+
+        Playwright launch is deferred until a rendered-navigation path is needed.
+        """
         return self
 
     async def __aexit__(
@@ -209,17 +222,27 @@ class SpringBrowser:
         await self._close()
 
     async def _launch(self) -> None:
-        """Launch browser and create initial context."""
+        """Launch browser and create initial context lazily."""
+        if self._browser is not None and self._page is not None:
+            return
         try:
             start = time.perf_counter()
-            self._playwright = await async_playwright().start()
-            self._browser = await self._playwright.chromium.launch(
-                headless=self.config.headless,
-            )
+            if self._playwright is None:
+                self._playwright = await async_playwright().start()
+            if self._browser is None:
+                self._browser = await self._playwright.chromium.launch(
+                    headless=self.config.headless,
+                )
             await self._create_context()
             logger.info(f"Browser launched in {time.perf_counter() - start:.2f}s")
         except PlaywrightError as e:
             raise BrowserLaunchError(f"Failed to launch browser: {e}") from e
+
+    async def _ensure_playwright_ready(self) -> None:
+        """Ensure Playwright browser/page is available for rendered operations."""
+        if self._browser is not None and self._page is not None:
+            return
+        await self._launch()
 
     async def _close(self) -> None:
         """Close browser and cleanup resources."""
@@ -269,6 +292,75 @@ class SpringBrowser:
     def _get_user_agent(self) -> str:
         """Get random user agent from pool."""
         return random.choice(USER_AGENTS)
+
+    @staticmethod
+    def _unique_selectors(selectors: list[str]) -> list[str]:
+        """Preserve selector order while removing duplicates/empties."""
+        seen: set[str] = set()
+        normalized: list[str] = []
+        for selector in selectors:
+            clean = selector.strip()
+            if not clean or clean in seen:
+                continue
+            seen.add(clean)
+            normalized.append(clean)
+        return normalized
+
+    async def _fetch_html_httpx(self, url: str, timeout_ms: int) -> str | None:
+        """Fetch HTML via httpx as the fast path before Playwright fallback."""
+        timeout_seconds = timeout_ms / 1000
+        headers = {
+            **STATIC_FETCH_BASE_HEADERS,
+            "User-Agent": self._get_user_agent(),
+        }
+        timeout = httpx.Timeout(timeout_seconds)
+
+        try:
+            async with httpx.AsyncClient(
+                follow_redirects=True,
+                timeout=timeout,
+            ) as client:
+                response = await client.get(url, headers=headers)
+                response.raise_for_status()
+                html = response.text
+                if not html.strip():
+                    logger.debug("Static fetch returned empty HTML for %s", url)
+                    return None
+                return html
+        except (
+            httpx.TimeoutException,
+            httpx.NetworkError,
+            httpx.HTTPStatusError,
+            httpx.RequestError,
+        ) as exc:
+            logger.debug("Static fetch failed for %s: %s", url, exc)
+            return None
+
+    @classmethod
+    def _is_static_html_sufficient(
+        cls,
+        html: str,
+        content_selectors: list[str] | None = None,
+    ) -> tuple[bool, str]:
+        """Validate whether static HTML likely contains parseable main content."""
+        soup = BeautifulSoup(html, "lxml")
+        selectors = cls._unique_selectors(
+            (content_selectors or [])
+            + [
+                "main",
+                "article",
+                "div.content",
+                ".content",
+            ]
+        )
+        for selector in selectors:
+            node = soup.select_one(selector)
+            if node and isinstance(node, Tag):
+                text = cls._normalize_extracted_content(node.get_text(" ", strip=True))
+                if text:
+                    return True, f"selector '{selector}' matched"
+
+        return False, "no strong content selector matched"
 
     @staticmethod
     def _normalize_extracted_content(content: str) -> str:
@@ -323,37 +415,21 @@ class SpringBrowser:
         if not self.config.enable_fast_precheck:
             return None
 
-        timeout_seconds = self.config.fast_precheck_timeout_ms / 1000
-        headers = {"User-Agent": self._get_user_agent()}
+        html = await self._fetch_html_httpx(url, timeout_ms=self.config.fast_precheck_timeout_ms)
+        if html is None:
+            return None
 
-        try:
-            async with httpx.AsyncClient(
-                follow_redirects=True,
-                timeout=timeout_seconds,
-            ) as client:
-                response = await client.get(url, headers=headers)
-                if response.status_code >= 400:
-                    logger.debug(
-                        "Fast precheck skipped for %s due to HTTP %s",
-                        url,
-                        response.status_code,
-                    )
-                    return None
+        content_hash = self.compute_core_content_hash(html)
+        self._last_precheck_hash = content_hash
+        if not content_hash:
+            return None
 
-                content_hash = self.compute_core_content_hash(response.text)
-                self._last_precheck_hash = content_hash
-                if not content_hash:
-                    return None
-
-                if stored_hash and content_hash == stored_hash:
-                    logger.info(
-                        "Fast precheck matched stored hash; skipping Playwright for %s",
-                        url,
-                    )
-                    return NotModifiedSignal(url=url, content_hash=content_hash)
-
-        except httpx.HTTPError as exc:
-            logger.debug("Fast precheck failed for %s: %s", url, exc)
+        if stored_hash and content_hash == stored_hash:
+            logger.info(
+                "Fast precheck matched stored hash; skipping Playwright for %s",
+                url,
+            )
+            return NotModifiedSignal(url=url, content_hash=content_hash)
 
         return None
 
@@ -385,6 +461,7 @@ class SpringBrowser:
             RateLimitError: If rate limited (HTTP 429) - no retry
             NavigationError: For other navigation failures after retries
         """
+        await self._ensure_playwright_ready()
         if not self._page:
             raise BrowserLaunchError("Browser not launched")
 
@@ -541,6 +618,32 @@ class SpringBrowser:
                 f"Failed to extract HTML: {e}",
                 url=self._current_url,
             ) from e
+
+    async def get_html_with_fallback(
+        self,
+        url: str,
+        content_selectors: list[str] | None = None,
+    ) -> str:
+        """Fetch HTML through static-first strategy with Playwright fallback."""
+        self._current_url = url
+        static_html = await self._fetch_html_httpx(
+            url,
+            timeout_ms=self.config.static_fetch_timeout_ms,
+        )
+        if static_html is not None:
+            sufficient, reason = self._is_static_html_sufficient(
+                static_html,
+                content_selectors=content_selectors,
+            )
+            if sufficient:
+                logger.debug("Static HTML accepted for %s (%s)", url, reason)
+                return static_html
+            logger.debug("Static HTML insufficient for %s (%s)", url, reason)
+        else:
+            logger.debug("Static HTML unavailable for %s, falling back to Playwright", url)
+
+        await self.navigate_with_retry(url)
+        return await self.get_html()
 
     async def get_content(self, selector: str) -> str:
         """Get text content of element matching selector.
