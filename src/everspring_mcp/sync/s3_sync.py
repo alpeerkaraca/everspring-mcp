@@ -22,6 +22,7 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
 import boto3
+from botocore import UNSIGNED
 from botocore.config import Config as BotoCoreConfig
 from botocore.exceptions import BotoCoreError, ClientError
 from pydantic import BaseModel, Field
@@ -229,11 +230,24 @@ class S3SyncService:
         """
         start = time.perf_counter()
         self.config = config
-        self._s3: S3Client = s3_client or boto3.client(
-            "s3",
-            region_name=config.s3_region,
-            config=BotoCoreConfig(max_pool_connections=config.parallel_jobs),
-        )
+
+        if s3_client:
+            self._s3: S3Client = s3_client
+        else:
+            session = boto3.Session()
+            credentials = session.get_credentials()
+
+            boto_kwargs = {"max_pool_connections": config.parallel_jobs}
+
+            if credentials is None:
+                boto_kwargs["signature_version"] = UNSIGNED
+
+            self._s3: S3Client = boto3.client(
+                "s3",
+                region_name=config.s3_region,
+                config=BotoCoreConfig(**boto_kwargs),
+            )
+
         self._semaphore = asyncio.Semaphore(config.parallel_jobs)
         logger.info(f"S3SyncService initialized in {time.perf_counter() - start:.2f}s")
 
@@ -653,16 +667,22 @@ class S3SyncService:
         )
         for base_prefix in prefixes:
             prefix = f"{base_prefix.rstrip('/')}/"
-            async for page in self._async_paginate(
-                paginator, self.config.s3_bucket, prefix
-            ):
-                for obj in page.get("Contents", []):
-                    key = obj.get("Key")
-                    if not key or key in seen_keys:
-                        continue
-                    seen_keys.add(key)
-                    objects.append(obj)
-
+            try:
+                async for page in self._async_paginate(
+                    paginator, self.config.s3_bucket, prefix
+                ):
+                    for obj in page.get("Contents", []):
+                        key = obj.get("Key")
+                        if not key or key in seen_keys:
+                            continue
+                        seen_keys.add(key)
+                        objects.append(obj)
+            except (ClientError) as e:
+                error_code = e.response.get("Error", {}).get("Code","")
+                if error_code == "AccessDenied":
+                    logger.warning("Access denied listing prefix %s, skipping...", prefix)
+                    continue
+                raise
         if not objects:
             logger.warning(
                 "No snapshot objects found under prefixes: %s",
