@@ -40,7 +40,10 @@ dependencies = [
     "tenacity>=8.2.0",
     "torch>=2.4",
     "rich>=13.7.0",
+    "fastapi>=0.135.3",
+    "uvicorn>=0.44.0",
 ]
+
 
 [project.optional-dependencies]
 dev = [
@@ -52,6 +55,14 @@ dev = [
     "boto3-stubs[s3]>=1.28.0",
     "moto[s3]>=4.2.0",
 ]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
 
 [project.scripts]
 everspring-mcp = "everspring_mcp.mcp.server:run_server"

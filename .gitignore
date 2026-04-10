@@ -74,3 +74,5 @@ logs/
 **/.playwright-mcp/**
 
 report.md
+a.ps1
+infrastructure/ecs-fargate/.terraform.lock.hcl

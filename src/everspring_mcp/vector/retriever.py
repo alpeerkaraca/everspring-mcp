@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from functools import partial
 import time
 from collections import defaultdict
 from typing import Any
@@ -229,19 +230,17 @@ class HybridRetriever:
         top_k: int,
         where: dict[str, Any] | None,
     ) -> list[dict[str, Any]]:
-        """Run dense retrieval via ChromaDB.
-
-        Returns list of dicts with id, content, metadata, distance.
-        """
-        # Embed query
+        """Run dense retrieval via ChromaDB."""
+        
         query_vectors = await self._embedder.embed_texts([query])
 
-        # Query ChromaDB
-        results = self._chroma.query(
+        query_func = partial(
+            self._chroma.query,
             query_embeddings=query_vectors,
             n_results=top_k,
             where=where,
         )
+        results = await asyncio.to_thread(query_func)
 
         # Flatten results
         docs = []
@@ -250,15 +249,9 @@ class HybridRetriever:
                 docs.append(
                     {
                         "id": doc_id,
-                        "content": results["documents"][0][i]
-                        if results["documents"]
-                        else "",
-                        "metadata": results["metadatas"][0][i]
-                        if results["metadatas"]
-                        else {},
-                        "distance": results["distances"][0][i]
-                        if results["distances"]
-                        else 0,
+                        "content": results["documents"][0][i] if results["documents"] else "",
+                        "metadata": results["metadatas"][0][i] if results["metadatas"] else {},
+                        "distance": results["distances"][0][i] if results["distances"] else 0,
                     }
                 )
 

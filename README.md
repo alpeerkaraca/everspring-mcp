@@ -19,7 +19,7 @@ No Python environment setup and no AWS keys are required for normal plug-and-pla
    ```
 2. **Run MCP server (`xslim` tier)**
    ```bash
-   docker run --name everspring-xslim --rm -i -e EVERSPRING_MODEL_TIER=xslim -e EVERSPRING_DATA_DIR=/home/everspring/.everspring -v everspring-data-xslim:/home/everspring/.everspring everspring-mcp:latest python -m everspring_mcp.main serve --tier xslim
+   docker run --name everspring-xslim --rm -i -e EVERSPRING_MODEL_TIER=xslim -e EVERSPRING_DATA_DIR=/home/everspring/.everspring -v everspring-data-xslim:/home/everspring/.everspring everspring-mcp:latest python -m everspring_mcp.main serve --tier xslim --transport stdio
    ```
 
 ### Option B: For Developers (Using uv)
@@ -356,7 +356,9 @@ python -m everspring_mcp.main serve --tier main
         "everspring_mcp.main",
         "serve",
         "--tier",
-        "main"
+        "main",
+        "--transport",
+        "stdio"
       ]
     },
     "everspring-slim": {
@@ -379,7 +381,9 @@ python -m everspring_mcp.main serve --tier main
         "everspring_mcp.main",
         "serve",
         "--tier",
-        "slim"
+        "slim",
+        "--transport",
+        "stdio"
       ]
     },
     "everspring-xslim": {
@@ -402,7 +406,9 @@ python -m everspring_mcp.main serve --tier main
         "everspring_mcp.main",
         "serve",
         "--tier",
-        "xslim"
+        "xslim",
+        "--transport",
+        "stdio"
       ]
     }
   }

@@ -11,8 +11,8 @@ FROM python:3.11-slim-bookworm AS builder
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PATH="/app/.venv/bin:${PATH}" \
-    UV_PROJECT_ENVIRONMENT=/app/.venv
-
+    UV_PROJECT_ENVIRONMENT=/app/.venv \
+    HF_HUB_OFFLINE=1
 WORKDIR /app
 
 # Install uv only in builder (not copied to runner).
@@ -49,6 +49,14 @@ RUN groupadd --gid 1000 everspring \
 
 COPY --from=builder /app/.venv /app/.venv
 COPY --from=builder /app/src /app/src
+
+RUN if [ -x "/app/.venv/bin/playwright" ]; then \
+        /app/.venv/bin/playwright install chromium && \
+        /app/.venv/bin/playwright install-deps chromium && \
+        rm -rf /root/.cache/ms-playwright/firefox-* && \
+        rm -rf /root/.cache/ms-playwright/webkit-* && \
+        rm -rf /var/lib/apt/lists/*; \
+    fi
 
 RUN chown -R 1000:1000 /app /home/everspring
 

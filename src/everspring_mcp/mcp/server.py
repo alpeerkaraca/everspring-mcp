@@ -326,35 +326,7 @@ class MCPServer:
             )
 
         try:
-            status = await self._tool.get_status()
-            available_modules = [module.name for module in status.modules]
-            if (
-                params.module
-                and available_modules
-                and params.module not in available_modules
-            ):
-                return self._error_result(
-                    StructuredErrorResponse(
-                        error_type="invalid_module",
-                        message=(
-                            f"Module '{params.module}' is not available in the current index."
-                        ),
-                        resolution_hints=[
-                            "Use one of the available modules from context.available_modules.",
-                            "Run sync/index to refresh local data if the module should exist.",
-                            "Retry without module filter to inspect broader results.",
-                        ],
-                        context={
-                            "requested_module": params.module,
-                            "available_modules": available_modules,
-                            "available_versions_by_module": {
-                                module.name: module.versions
-                                for module in status.modules
-                            },
-                        },
-                    )
-                )
-
+            
             search_params = SearchParameters(
                 query=params.query,
                 top_k=params.top_k,
@@ -412,6 +384,10 @@ class MCPServer:
     async def serve_stdio(self) -> None:
         """Run MCP SDK server over stdio transport."""
         logger.info("Starting %s MCP SDK server over stdio", self.name)
+        self._ensure_retriever()
+        self._start_preheat()
+        await self.initialize()
+
         async with stdio_server() as (read_stream, write_stream):
             await self._server.run(
                 read_stream,
@@ -421,11 +397,28 @@ class MCPServer:
                 ),
             )
 
+    async def serve_http(self) -> None:
+        """Run MCP SDK server over HTTP transport."""
+        logger.info("Starting %s MCP SDK server over HTTP", self.name)
+        self._ensure_retriever()
+        self._start_preheat()
+        await self.initialize()
+        from everspring_mcp.http.serve_http import serve_http
+
+        await serve_http(
+            self._server,
+            server_name=self.name,
+        )
+
     def run(self, transport: str = "stdio") -> None:
-        """Synchronous wrapper for stdio MCP serving."""
-        if transport != "stdio":
-            raise ValueError(f"Unsupported transport: {transport}")
-        asyncio.run(self.serve_stdio())
+        """Synchronous wrapper for stdio/http MCP serving."""
+        if transport == "stdio":
+            asyncio.run(self.serve_stdio())
+            return
+        if transport == "http":
+            asyncio.run(self.serve_http())
+            return
+        raise ValueError(f"Unsupported transport: {transport}")
 
     async def handle_request(
         self,
