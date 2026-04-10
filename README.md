@@ -7,6 +7,21 @@
 ![AMD ROCm](https://img.shields.io/badge/AMD%20ROCm-RX%209000%20Ready-ED1C24?logo=amd&logoColor=white)
 ![Apple Silicon](https://img.shields.io/badge/Apple%20Silicon-MPS%20Fallback-A2AAAD?logo=apple&logoColor=white)
 
+## 🚀 Quickstart (3 Steps to Run)
+
+1. **Install dependencies**
+   ```bash
+   uv sync
+   ```
+2. **Download a pre-built slim snapshot**
+   ```bash
+   uv run python -m everspring_mcp.main sync --mode snapshot-download --snapshot-tier slim --snapshot-model BAAI/bge-base-en-v1.5
+   ```
+3. **Start the MCP server**
+   ```bash
+   uv run python -m everspring_mcp.main serve --tier slim
+   ```
+
 EverSpring MCP is a Spring documentation ingestion, indexing, and retrieval system with an MCP server interface.  
 Primary CLI entrypoint: `python -m everspring_mcp.main`.
 

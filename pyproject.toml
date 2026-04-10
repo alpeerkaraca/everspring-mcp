@@ -39,6 +39,7 @@ dependencies = [
     "rank-bm25>=0.2.2",
     "tenacity>=8.2.0",
     "torch>=2.4",
+    "rich>=13.7.0",
 ]
 
 [project.optional-dependencies]

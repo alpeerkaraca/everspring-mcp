@@ -20,6 +20,9 @@ from pathlib import Path
 from typing import Any
 
 from chromadb.errors import InvalidArgumentError
+from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
 
 from everspring_mcp.models.content import ContentType
 from everspring_mcp.models.spring import SpringModule, SpringVersion
@@ -39,6 +42,103 @@ from everspring_mcp.vector.indexer import VectorIndexer
 from everspring_mcp.vector.retriever import HybridRetriever
 
 logger = logging.getLogger("everspring_mcp")
+console = Console(stderr=True)
+
+
+def _format_cell(value: Any) -> str:
+    if value is None:
+        return "-"
+    if isinstance(value, (dict, list, tuple, set)):
+        return json.dumps(value, ensure_ascii=False)
+    return str(value)
+
+
+def _render_kv_panel(
+    title: str, values: dict[str, Any], *, border_style: str = "cyan"
+) -> None:
+    grid = Table.grid(padding=(0, 2))
+    grid.add_column(style="bold")
+    grid.add_column()
+    for key, value in values.items():
+        grid.add_row(key.replace("_", " ").title(), _format_cell(value))
+    console.print(Panel(grid, title=title, border_style=border_style))
+
+
+def _render_error_table(errors: list[str]) -> None:
+    if not errors:
+        return
+    table = Table(title="Errors", header_style="bold red")
+    table.add_column("#", style="bold")
+    table.add_column("Message")
+    for idx, error in enumerate(errors, 1):
+        table.add_row(str(idx), error)
+    console.print(table)
+
+
+def _render_status_rows(title: str, rows: list[dict[str, Any]]) -> None:
+    if not rows:
+        console.print(
+            Panel("No status data available.", title=title, border_style="yellow")
+        )
+        return
+    preferred_columns = [
+        "module",
+        "submodule",
+        "version",
+        "status",
+        "files_added",
+        "files_modified",
+        "files_removed",
+        "bytes_downloaded",
+    ]
+    all_columns = {key for row in rows for key in row}
+    columns = [col for col in preferred_columns if col in all_columns]
+    if not columns:
+        columns = sorted(all_columns)
+    table = Table(title=title, header_style="bold blue")
+    for column in columns:
+        table.add_column(column.replace("_", " ").title())
+    for row in rows:
+        table.add_row(*[_format_cell(row.get(column)) for column in columns])
+    console.print(table)
+
+
+def _render_search_results(results: list[Any]) -> None:
+    if not results:
+        console.print(Panel("No results found.", title="Search", border_style="yellow"))
+        return
+
+    summary = Table(title="Spring Docs Search Results", header_style="bold magenta")
+    summary.add_column("#", style="bold")
+    summary.add_column("Title")
+    summary.add_column("Module")
+    summary.add_column("Version")
+    summary.add_column("Score", justify="right")
+    summary.add_column("URL", overflow="fold")
+    for idx, result in enumerate(results, 1):
+        summary.add_row(
+            str(idx),
+            result.title,
+            result.module,
+            f"{result.version_major}.{result.version_minor}",
+            f"{result.score:.4f}",
+            result.url,
+        )
+    console.print(summary)
+
+    for idx, result in enumerate(results, 1):
+        rank_info = (
+            f"Dense rank: #{result.dense_rank if result.dense_rank is not None else '-'} | "
+            f"Sparse rank: #{result.sparse_rank if result.sparse_rank is not None else '-'}"
+        )
+        console.print(
+            Panel(
+                f"{rank_info}\n\n{result.content}",
+                title=f"[{idx}] {result.title}",
+                subtitle=result.url,
+                border_style="cyan",
+            )
+        )
 
 
 def _parse_module(value: str) -> SpringModule:
@@ -110,7 +210,11 @@ def _save_snapshot_state(data_dir: Path, state: dict[str, str]) -> None:
 def _restart_current_process() -> None:
     env = os.environ.copy()
     env["EVERSPRING_AUTO_SNAPSHOT_RESTARTED"] = "1"
-    os.execvpe(sys.executable, [sys.executable, "-m", "everspring_mcp.main", *sys.argv[1:]], env)
+    os.execvpe(
+        sys.executable,
+        [sys.executable, "-m", "everspring_mcp.main", *sys.argv[1:]],
+        env,
+    )
 
 
 async def _auto_refresh_runtime_snapshots(
@@ -173,31 +277,35 @@ async def _auto_refresh_runtime_snapshots(
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="EverSpring MCP CLI",
+        description="EverSpring docs CLI",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
         "--log-level",
         default="INFO",
-        help="Logging level (DEBUG, INFO, WARNING, ERROR)",
+        help="Log level",
     )
     parser.add_argument(
         "--log-file",
         default=None,
-        help="Optional log file path (disabled by default)",
+        help="Extra log file path",
     )
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     scrape = subparsers.add_parser(
         "scrape",
-        help="Discover and scrape Spring docs into S3",
+        help="Scrape docs to S3",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     scrape.add_argument("--entry-url", default=None, help="Entry URL for discovery")
-    scrape.add_argument("--module", default=None, type=_parse_module, help="Spring module")
+    scrape.add_argument(
+        "--module", default=None, type=_parse_module, help="Spring module"
+    )
     scrape.add_argument("--version", default=None, help="Version string (e.g., 4.0.5)")
-    scrape.add_argument("--submodule", default=None, help="Optional submodule key (e.g., redis)")
+    scrape.add_argument(
+        "--submodule", default=None, help="Optional submodule key (e.g., redis)"
+    )
     scrape.add_argument(
         "--content-type",
         default=ContentType.REFERENCE.value,
@@ -209,21 +317,29 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Path to submodule registry JSON (defaults to config/submodules.json)",
     )
-    scrape.add_argument("--concurrency", type=int, default=5, help="Max concurrent scrapes")
+    scrape.add_argument(
+        "--concurrency", type=int, default=5, help="Max concurrent scrapes"
+    )
     scrape.add_argument("--s3-bucket", default=None, help="S3 bucket override")
     scrape.add_argument("--s3-region", default=None, help="S3 region override")
     scrape.add_argument("--s3-prefix", default=None, help="S3 key prefix override")
-    scrape.add_argument("--no-hash-check", action="store_true", help="Disable hash checks")
+    scrape.add_argument(
+        "--no-hash-check", action="store_true", help="Disable hash checks"
+    )
     scrape.add_argument("--json", action="store_true", help="Output JSON summary")
 
     sync = subparsers.add_parser(
         "sync",
-        help="Sync raw docs or upload DB snapshots",
+        help="Sync docs and snapshots",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    sync.add_argument("--module", required=False, help="Spring module (e.g., spring-boot)")
+    sync.add_argument(
+        "--module", required=False, help="Spring module (e.g., spring-boot)"
+    )
     sync.add_argument("--version", required=False, help="Version string (e.g., 4.0.5)")
-    sync.add_argument("--submodule", default=None, help="Optional submodule key (e.g., redis)")
+    sync.add_argument(
+        "--submodule", default=None, help="Optional submodule key (e.g., redis)"
+    )
     sync.add_argument(
         "--all",
         action="store_true",
@@ -278,31 +394,47 @@ def _build_parser() -> argparse.ArgumentParser:
 
     status = subparsers.add_parser(
         "status",
-        help="Show local sync status",
+        help="Show sync status",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    status.add_argument("--module", required=False, help="Spring module (e.g., spring-boot)")
-    status.add_argument("--version", required=False, help="Version string (e.g., 4.0.5)")
-    status.add_argument("--submodule", default=None, help="Optional submodule key (e.g., redis)")
+    status.add_argument(
+        "--module", required=False, help="Spring module (e.g., spring-boot)"
+    )
+    status.add_argument(
+        "--version", required=False, help="Version string (e.g., 4.0.5)"
+    )
+    status.add_argument(
+        "--submodule", default=None, help="Optional submodule key (e.g., redis)"
+    )
     status.add_argument(
         "--all",
         action="store_true",
         help="Show status for all module/submodule/version entries in local manifest cache",
     )
-    status.add_argument("--data-dir", default=None, help="Local data directory override")
+    status.add_argument(
+        "--data-dir", default=None, help="Local data directory override"
+    )
     status.add_argument("--json", action="store_true", help="Output JSON summary")
 
     index = subparsers.add_parser(
         "index",
-        help="Index local docs into ChromaDB",
+        help="Index docs into ChromaDB",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     index.add_argument("--limit", type=int, default=50, help="Max documents to index")
     index.add_argument("--data-dir", default=None, help="Local data directory override")
-    index.add_argument("--db-filename", default=None, help="SQLite database filename override")
-    index.add_argument("--docs-subdir", default=None, help="Local docs subdirectory override")
-    index.add_argument("--chroma-dir", default=None, help="ChromaDB persistent dir override")
-    index.add_argument("--collection", default=None, help="ChromaDB collection name override")
+    index.add_argument(
+        "--db-filename", default=None, help="SQLite database filename override"
+    )
+    index.add_argument(
+        "--docs-subdir", default=None, help="Local docs subdirectory override"
+    )
+    index.add_argument(
+        "--chroma-dir", default=None, help="ChromaDB persistent dir override"
+    )
+    index.add_argument(
+        "--collection", default=None, help="ChromaDB collection name override"
+    )
     index.add_argument("--embed-model", default=None, help="Embedding model override")
     index.add_argument(
         "--tier",
@@ -310,9 +442,15 @@ def _build_parser() -> argparse.ArgumentParser:
         default="main",
         help="Embedding tier",
     )
-    index.add_argument("--max-tokens", type=int, default=None, help="Max tokens per chunk override")
-    index.add_argument("--overlap-tokens", type=int, default=None, help="Token overlap override")
-    index.add_argument("--batch-size", type=int, default=None, help="Embedding batch size override")
+    index.add_argument(
+        "--max-tokens", type=int, default=None, help="Max tokens per chunk override"
+    )
+    index.add_argument(
+        "--overlap-tokens", type=int, default=None, help="Token overlap override"
+    )
+    index.add_argument(
+        "--batch-size", type=int, default=None, help="Embedding batch size override"
+    )
     index.add_argument(
         "--chunk-workers",
         type=int,
@@ -325,29 +463,39 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Chroma upsert batch size override",
     )
-    index.add_argument("--reindex", action="store_true", help="Reset indexed flags and rebuild vectors")
+    index.add_argument(
+        "--reindex", action="store_true", help="Reset indexed flags and rebuild vectors"
+    )
     index.add_argument(
         "--build-bm25",
         action="store_true",
         help="Build BM25 index after vector indexing",
     )
-    index.add_argument("--module", default=None, help="Module filter for --reindex (e.g., spring-boot)")
-    index.add_argument("--version", type=int, default=None, help="Major version filter for --reindex")
-    index.add_argument("--submodule", default=None, help="Submodule filter for --reindex")
+    index.add_argument(
+        "--module", default=None, help="Module filter for --reindex (e.g., spring-boot)"
+    )
+    index.add_argument(
+        "--version", type=int, default=None, help="Major version filter for --reindex"
+    )
+    index.add_argument(
+        "--submodule", default=None, help="Submodule filter for --reindex"
+    )
     index.add_argument("--json", action="store_true", help="Output JSON summary")
 
     search = subparsers.add_parser(
         "search",
-        help="Search indexed documentation",
+        help="Search indexed docs",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     search.add_argument(
-        "--query", "-q",
+        "--query",
+        "-q",
         required=True,
         help="Search query text",
     )
     search.add_argument(
-        "--top-k", "-k",
+        "--top-k",
+        "-k",
         type=int,
         default=3,
         help="Number of results to return",
@@ -383,11 +531,15 @@ def _build_parser() -> argparse.ArgumentParser:
 
     model_cache = subparsers.add_parser(
         "model-cache",
-        help="Pre-download and cache embedding model artifacts",
+        help="Warm embedding model cache",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    model_cache.add_argument("--embed-model", default=None, help="Embedding model override")
-    model_cache.add_argument("--batch-size", type=int, default=None, help="Embedding batch size override")
+    model_cache.add_argument(
+        "--embed-model", default=None, help="Embedding model override"
+    )
+    model_cache.add_argument(
+        "--batch-size", type=int, default=None, help="Embedding batch size override"
+    )
     model_cache.add_argument("--json", action="store_true", help="Output JSON summary")
 
     serve = subparsers.add_parser(
@@ -407,12 +559,14 @@ def _build_parser() -> argparse.ArgumentParser:
         default="main",
         help="Embedding tier",
     )
-    serve.add_argument("--json", action="store_true", help="Output JSON status on startup")
+    serve.add_argument(
+        "--json", action="store_true", help="Output JSON status on startup"
+    )
 
     # Interactive client command
     client_cmd = subparsers.add_parser(
         "client",
-        help="Interactive search client",
+        help="Run interactive client",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     client_cmd.add_argument(
@@ -440,9 +594,9 @@ def _configure_logging(level: str, log_file: str | None) -> None:
     if log_file:
         logger = logging.getLogger("everspring_mcp")
         handler = logging.FileHandler(log_file, encoding="utf-8")
-        handler.setFormatter(logging.Formatter(
-            "%(asctime)s [%(levelname)s] %(name)s - %(message)s"
-        ))
+        handler.setFormatter(
+            logging.Formatter("%(asctime)s [%(levelname)s] %(name)s - %(message)s")
+        )
         logger.addHandler(handler)
 
 
@@ -464,7 +618,9 @@ async def _run_scrape(args: argparse.Namespace) -> int:
     version = _parse_version(args.version, module) if args.version and module else None
     content_type = args.content_type
 
-    if any([args.entry_url, module, version]) and not all([args.entry_url, module, version]):
+    if any([args.entry_url, module, version]) and not all(
+        [args.entry_url, module, version]
+    ):
         raise ValueError("entry-url, module, and version must be provided together")
     if args.submodule and not module:
         raise ValueError("submodule requires module to be set")
@@ -518,7 +674,9 @@ async def _run_scrape(args: argparse.Namespace) -> int:
     return 0 if failed == 0 else 1
 
 
-def _load_sync_targets_from_matrix(matrix_path: Path) -> list[tuple[str, str, str | None]]:
+def _load_sync_targets_from_matrix(
+    matrix_path: Path,
+) -> list[tuple[str, str, str | None]]:
     """Load deduplicated sync targets from module/submodule CSV."""
     if not matrix_path.exists():
         raise SystemExit(f"CSV not found: {matrix_path}")
@@ -547,7 +705,9 @@ async def _run_manifest_sync(args: argparse.Namespace, config: SyncConfig) -> in
     """Run legacy manifest-based incremental sync."""
     async with SyncOrchestrator(config) as orchestrator:
         if args.all:
-            targets = _load_sync_targets_from_matrix(Path("config") / "module_submodule_urls.csv")
+            targets = _load_sync_targets_from_matrix(
+                Path("config") / "module_submodule_urls.csv"
+            )
             results = []
             for module, version, submodule in targets:
                 res = await orchestrator.sync_module(
@@ -567,21 +727,28 @@ async def _run_manifest_sync(args: argparse.Namespace, config: SyncConfig) -> in
                 "files_modified": sum(r.files_modified for r in results),
                 "files_removed": sum(r.files_removed for r in results),
                 "bytes_downloaded": sum(r.bytes_downloaded for r in results),
-                "errors": [f"{r.module}:{r.version} -> {err}" for r in results for err in r.errors],
+                "errors": [
+                    f"{r.module}:{r.version} -> {err}"
+                    for r in results
+                    for err in r.errors
+                ],
             }
             if args.json:
                 logger.info(json.dumps(summary, indent=2))
             else:
-                logger.info(
-                    f"Sync-all (manifest): {summary['completed']}/{summary['targets']} completed, "
-                    f"{summary['failed']} failed "
-                    f"(+{summary['files_added']} ~{summary['files_modified']} -{summary['files_removed']}, "
-                    f"{summary['bytes_downloaded']} bytes)"
+                _render_kv_panel(
+                    "Sync Summary (manifest)",
+                    {
+                        "targets": summary["targets"],
+                        "completed": summary["completed"],
+                        "failed": summary["failed"],
+                        "files_added": summary["files_added"],
+                        "files_modified": summary["files_modified"],
+                        "files_removed": summary["files_removed"],
+                        "bytes_downloaded": summary["bytes_downloaded"],
+                    },
                 )
-                if summary["errors"]:
-                    logger.info("Errors:")
-                    for err in summary["errors"]:
-                        logger.info(f"- {err}")
+                _render_error_table(summary["errors"])
             return 0 if summary["failed"] == 0 else 1
 
         result = await orchestrator.sync_module(
@@ -594,15 +761,20 @@ async def _run_manifest_sync(args: argparse.Namespace, config: SyncConfig) -> in
     if args.json:
         logger.info(result.model_dump_json(indent=2))
     else:
-        logger.info(
-            f"Sync status (manifest): {result.status.value} "
-            f"(+{result.files_added} ~{result.files_modified} -{result.files_removed}, "
-            f"{result.bytes_downloaded} bytes)"
+        _render_kv_panel(
+            "Sync Status (manifest)",
+            {
+                "status": result.status.value,
+                "module": result.module,
+                "version": result.version,
+                "submodule": result.submodule or "",
+                "files_added": result.files_added,
+                "files_modified": result.files_modified,
+                "files_removed": result.files_removed,
+                "bytes_downloaded": result.bytes_downloaded,
+            },
         )
-        if result.errors:
-            logger.info("Errors:")
-            for err in result.errors:
-                logger.info(f"- {err}")
+        _render_error_table(result.errors)
     return 0 if result.status.value == "completed" else 1
 
 
@@ -612,7 +784,9 @@ async def _run_manifest_prime(args: argparse.Namespace, config: SyncConfig) -> i
     parallel_jobs = config.parallel_jobs
 
     if args.all:
-        targets = _load_sync_targets_from_matrix(Path("config") / "module_submodule_urls.csv")
+        targets = _load_sync_targets_from_matrix(
+            Path("config") / "module_submodule_urls.csv"
+        )
     else:
         targets = [(args.module, args.version, args.submodule)]
 
@@ -641,7 +815,9 @@ async def _run_manifest_prime(args: argparse.Namespace, config: SyncConfig) -> i
         "skipped": sum(1 for r in results if r.status == "skipped"),
         "failed": sum(1 for r in results if r.status == "failed"),
         "files_covered": sum(r.file_count for r in results if r.status != "failed"),
-        "total_size_bytes": sum(r.total_size_bytes for r in results if r.status != "failed"),
+        "total_size_bytes": sum(
+            r.total_size_bytes for r in results if r.status != "failed"
+        ),
         "results": [r.model_dump() for r in results],
         "errors": [
             f"{r.module}:{r.version}{'/' + r.submodule if r.submodule else ''} -> {r.error}"
@@ -653,14 +829,19 @@ async def _run_manifest_prime(args: argparse.Namespace, config: SyncConfig) -> i
     if args.json:
         logger.info(json.dumps(summary, indent=2, default=str))
     else:
-        logger.info(
-            f"Manifest prime: {summary['uploaded']} uploaded, {summary['skipped']} skipped, "
-            f"{summary['failed']} failed ({summary['files_covered']} files)"
+        _render_kv_panel(
+            "Manifest Prime Summary",
+            {
+                "targets": summary["targets"],
+                "uploaded": summary["uploaded"],
+                "skipped": summary["skipped"],
+                "failed": summary["failed"],
+                "files_covered": summary["files_covered"],
+                "total_size_bytes": summary["total_size_bytes"],
+                "parallel_jobs": summary["parallel_jobs"],
+            },
         )
-        if summary["errors"]:
-            logger.info("Errors:")
-            for err in summary["errors"]:
-                logger.info(f"- {err}")
+        _render_error_table(summary["errors"])
     return 0 if summary["failed"] == 0 else 1
 
 
@@ -700,14 +881,20 @@ async def _run_sync(args: argparse.Namespace) -> int:
 
     if args.mode in {"snapshot-upload", "snapshot-download"}:
         if args.force:
-            raise SystemExit("--force is only supported with --mode manifest or --mode manifest-prime")
+            raise SystemExit(
+                "--force is only supported with --mode manifest or --mode manifest-prime"
+            )
         if any([args.module, args.version, args.submodule]):
             raise SystemExit(
                 f"--mode {args.mode} does not accept --module/--version/--submodule"
             )
         if args.mode == "snapshot-download" and args.all:
             raise SystemExit("--all is only supported with --mode snapshot-upload")
-        if args.mode == "snapshot-upload" and args.all and any([snapshot_tier, snapshot_model]):
+        if (
+            args.mode == "snapshot-upload"
+            and args.all
+            and any([snapshot_tier, snapshot_model])
+        ):
             raise SystemExit(
                 "--all cannot be combined with --snapshot-model/--snapshot-tier for --mode snapshot-upload"
             )
@@ -722,7 +909,9 @@ async def _run_sync(args: argparse.Namespace) -> int:
                             update={
                                 "model_tier": tier_name,
                                 "model_name": tier_model,
-                                "chroma_subdir": str(_tier_chroma_dir(tier_name, tier_model)),
+                                "chroma_subdir": str(
+                                    _tier_chroma_dir(tier_name, tier_model)
+                                ),
                             }
                         )
                     )
@@ -742,11 +931,15 @@ async def _run_sync(args: argparse.Namespace) -> int:
             summary = {
                 "mode": args.mode,
                 "scope": "all-tiers" if args.all else "single-namespace",
-                "snapshot_namespaces": sorted({r.snapshot_namespace for r in snapshot_results}),
+                "snapshot_namespaces": sorted(
+                    {r.snapshot_namespace for r in snapshot_results}
+                ),
                 "snapshots": len(snapshot_results),
                 "completed": sum(1 for r in snapshot_results if r.success),
                 "failed": sum(1 for r in snapshot_results if not r.success),
-                "bytes_uploaded": sum(r.size_bytes for r in snapshot_results if r.success),
+                "bytes_uploaded": sum(
+                    r.size_bytes for r in snapshot_results if r.success
+                ),
                 "results": [
                     {
                         "snapshot_name": r.snapshot_name,
@@ -759,22 +952,28 @@ async def _run_sync(args: argparse.Namespace) -> int:
                     }
                     for r in snapshot_results
                 ],
-                "errors": [f"{r.snapshot_name} -> {r.error}" for r in snapshot_results if not r.success and r.error],
+                "errors": [
+                    f"{r.snapshot_name} -> {r.error}"
+                    for r in snapshot_results
+                    if not r.success and r.error
+                ],
             }
 
             if args.json:
                 logger.info(json.dumps(summary, indent=2))
             else:
-                status = "completed" if summary["failed"] == 0 else "failed"
-                logger.info(
-                    f"Sync status ({args.mode}): {status} "
-                    f"({summary['completed']}/{summary['snapshots']} uploaded, "
-                    f"{summary['bytes_uploaded']} bytes)"
+                _render_kv_panel(
+                    "Snapshot Upload Summary",
+                    {
+                        "mode": args.mode,
+                        "scope": summary["scope"],
+                        "snapshots": summary["snapshots"],
+                        "completed": summary["completed"],
+                        "failed": summary["failed"],
+                        "bytes_uploaded": summary["bytes_uploaded"],
+                    },
                 )
-                if summary["errors"]:
-                    logger.info("Errors:")
-                    for err in summary["errors"]:
-                        logger.info(f"- {err}")
+                _render_error_table(summary["errors"])
             return 0 if summary["failed"] == 0 else 1
 
         if args.mode == "snapshot-download":
@@ -800,14 +999,24 @@ async def _run_sync(args: argparse.Namespace) -> int:
             else:
                 if snapshot_result.success:
                     downloaded_mb = snapshot_result.bytes_downloaded / (1024 * 1024)
-                    logger.info(
-                        f"Sync complete. {downloaded_mb:.1f}MB downloaded. "
-                        "Vector DB is now live and ready for search."
+                    _render_kv_panel(
+                        "Snapshot Download Complete",
+                        {
+                            "namespace": summary["snapshot_namespace"],
+                            "snapshot_token": summary["snapshot_token"],
+                            "chroma_snapshot": summary["chroma_snapshot"],
+                            "sqlite_snapshot": summary["sqlite_snapshot"],
+                            "downloaded_mb": round(downloaded_mb, 1),
+                        },
                     )
                 else:
-                    logger.info(
-                        f"Sync status ({args.mode}): failed "
-                        f"({snapshot_result.error or 'unknown error'})"
+                    _render_kv_panel(
+                        "Snapshot Download Failed",
+                        {
+                            "mode": args.mode,
+                            "error": snapshot_result.error or "unknown error",
+                        },
+                        border_style="red",
                     )
             return 0 if snapshot_result.success else 1
 
@@ -849,7 +1058,10 @@ async def _run_status(args: argparse.Namespace) -> int:
                     submodule=submodule,  # type: ignore[arg-type]
                 )
                 statuses.append(status)
-            logger.info(json.dumps(statuses, indent=2))
+            if args.json:
+                logger.info(json.dumps(statuses, indent=2))
+            else:
+                _render_status_rows("Sync Status (all targets)", statuses)
             return 0
 
         status = await orchestrator.get_sync_status(
@@ -858,7 +1070,10 @@ async def _run_status(args: argparse.Namespace) -> int:
             submodule=args.submodule,
         )
 
-    logger.info(json.dumps(status, indent=2))
+    if args.json:
+        logger.info(json.dumps(status, indent=2))
+    else:
+        _render_status_rows("Sync Status", [status])
     return 0
 
 
@@ -965,7 +1180,9 @@ async def _run_index(args: argparse.Namespace) -> int:
         retriever.build_bm25_index()
         bm25_index_built = True
     elif args.build_bm25:
-        logger.info("Skipping BM25 build for tier=main; using model-native retrieval path")
+        logger.info(
+            "Skipping BM25 build for tier=main; using model-native retrieval path"
+        )
 
     payload = {
         "documents_indexed": stats.documents_indexed,
@@ -973,7 +1190,9 @@ async def _run_index(args: argparse.Namespace) -> int:
         "documents_reset": reset_count,
         "vectors_deleted": deleted_vectors,
         "bm25_index_built": bm25_index_built,
-        "bm25_index_path": str(config.data_dir / "bm25_index.pkl") if bm25_index_built else None,
+        "bm25_index_path": str(config.data_dir / "bm25_index.pkl")
+        if bm25_index_built
+        else None,
     }
     if args.json:
         logger.info(json.dumps(payload, indent=2))
@@ -1032,7 +1251,7 @@ async def _run_client(args: argparse.Namespace) -> int:
     """Run interactive client."""
     from everspring_mcp.mcp.terminal_search import LocalSearchCLI
 
-    show_progress = not getattr(args, 'no_progress', False)
+    show_progress = not getattr(args, "no_progress", False)
     client = LocalSearchCLI(show_progress=show_progress)
 
     logger.info("EverSpring MCP - Spring Documentation Search")
@@ -1129,7 +1348,9 @@ async def _run_search(args: argparse.Namespace) -> int:
     retriever = HybridRetriever(config=config)
 
     # Build BM25 index for non-main tiers if requested or not exists
-    if config.embedding_tier != "main" and (args.build_index or not retriever.ensure_bm25_index()):
+    if config.embedding_tier != "main" and (
+        args.build_index or not retriever.ensure_bm25_index()
+    ):
         logger.info("Building BM25 index...")
         retriever.build_bm25_index()
 
@@ -1150,7 +1371,7 @@ async def _run_search(args: argparse.Namespace) -> int:
                 "the local Chroma snapshot. Stop other processes using "
                 f"'{config.chroma_dir}', then run:\n"
                 f"  python -m everspring_mcp.main sync --mode snapshot-download "
-                f"--snapshot-model \"{config.embedding_model}\" --snapshot-tier {config.embedding_tier}\n"
+                f'--snapshot-model "{config.embedding_model}" --snapshot-tier {config.embedding_tier}\n'
                 "After sync completes, rerun the search command."
             ) from exc
         raise
@@ -1172,18 +1393,7 @@ async def _run_search(args: argparse.Namespace) -> int:
         ]
         logger.info(json.dumps(output, indent=2))
     else:
-        if not results:
-            logger.info("No results found.")
-            return 0
-
-        for i, r in enumerate(results, 1):
-            logger.info(f"\n{'='*60}")
-            logger.info(f"[{i}] {r.title}")
-            logger.info(f"    URL: {r.url}")
-            logger.info(f"    Module: {r.module} v{r.version_major}.{r.version_minor}")
-            logger.info(f"    Score: {r.score:.4f} (dense: #{r.dense_rank}, sparse: #{r.sparse_rank})")
-            logger.info(f"{'='*60}")
-            logger.info(r.content)
+        _render_search_results(results)
 
     return 0
 
