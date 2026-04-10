@@ -73,3 +73,4 @@ logs/
 *.mcp
 **/.playwright-mcp/**
 
+report.md
