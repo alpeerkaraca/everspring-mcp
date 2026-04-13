@@ -61,6 +61,49 @@ def test_serve_parser_accepts_tier_flag() -> None:
     assert args.tier == "main"
 
 
+def test_serve_parser_accepts_http_performance_flags() -> None:
+    parser = cli_main._build_parser()
+    args = parser.parse_args(
+        [
+            "serve",
+            "--transport",
+            "http",
+            "--workers",
+            "2",
+            "--backlog",
+            "1024",
+            "--threads",
+            "4",
+        ]
+    )
+    assert args.workers == 2
+    assert args.backlog == 1024
+    assert args.threads == 4
+
+
+@pytest.mark.parametrize("flag", ["--workers", "--backlog", "--threads"])
+def test_serve_parser_rejects_non_positive_http_performance_flags(flag: str) -> None:
+    parser = cli_main._build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["serve", "--transport", "http", flag, "0"])
+
+
+@pytest.mark.asyncio
+async def test_run_serve_rejects_http_only_flags_for_stdio() -> None:
+    args = argparse.Namespace(
+        transport="stdio",
+        tier="main",
+        json=True,
+        workers=2,
+        backlog=None,
+        threads=None,
+        log_level="INFO",
+    )
+
+    with pytest.raises(SystemExit, match="can only be used with --transport http"):
+        await cli_main._run_serve(args)
+
+
 @pytest.mark.asyncio
 async def test_run_index_builds_bm25_when_flag_enabled(
     monkeypatch: pytest.MonkeyPatch,

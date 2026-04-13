@@ -167,6 +167,19 @@ def _parse_version(value: str, module: SpringModule) -> SpringVersion:
         raise argparse.ArgumentTypeError(str(exc)) from exc
 
 
+def _parse_positive_int(value: str) -> int:
+    """Parse CLI integer values that must be strictly positive."""
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"Expected integer value, got: {value}") from exc
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError(
+            f"Expected a value greater than 0, got: {value}"
+        )
+    return parsed
+
+
 def _model_slug(model_name: str) -> str:
     model_tail = model_name.strip().split("/")[-1]
     slug = re.sub(r"[^a-z0-9]+", "-", model_tail.lower()).strip("-")
@@ -561,6 +574,24 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     serve.add_argument(
         "--json", action="store_true", help="Output JSON status on startup"
+    )
+    serve.add_argument(
+        "--workers",
+        type=_parse_positive_int,
+        default=None,
+        help="Granian worker processes (HTTP transport only)",
+    )
+    serve.add_argument(
+        "--backlog",
+        type=_parse_positive_int,
+        default=None,
+        help="Granian socket backlog (HTTP transport only)",
+    )
+    serve.add_argument(
+        "--threads",
+        type=_parse_positive_int,
+        default=None,
+        help="Granian runtime threads per worker (HTTP transport only)",
     )
 
     # Interactive client command
@@ -1209,7 +1240,13 @@ async def _run_index(args: argparse.Namespace) -> int:
 
 async def _run_serve(args: argparse.Namespace) -> int:
     """Run MCP server."""
+    from everspring_mcp.http.serve_http import serve_http_via_granian
     from everspring_mcp.mcp.server import create_server
+
+    for option_name in ("workers", "backlog", "threads"):
+        option_value = getattr(args, option_name, None)
+        if option_value is not None and option_value <= 0:
+            raise SystemExit(f"--{option_name} must be greater than 0")
 
     config = VectorConfig.from_env()
     selected_tier = getattr(args, "tier", "main")
@@ -1226,25 +1263,42 @@ async def _run_serve(args: argparse.Namespace) -> int:
         tier=config.embedding_tier,
         data_dir=config.data_dir,
     )
-    server = create_server(config=config)
-
     if args.json:
         # Output status and continue
         status_info = {
             "status": "starting",
             "transport": args.transport,
-            "name": server.name,
+            "name": "everspring-mcp",
+            "workers": args.workers,
+            "backlog": args.backlog,
+            "threads": args.threads,
         }
         logger.info(json.dumps(status_info, indent=2))
     else:
-        logger.info(f"Starting {server.name} MCP server...")
+        logger.info("Starting everspring-mcp MCP server...")
 
     if args.transport == "stdio":
+        if args.workers is not None or args.backlog is not None or args.threads is not None:
+            raise SystemExit(
+                "--workers/--backlog/--threads can only be used with --transport http"
+            )
         logger.info("Using stdio transport")
+        server = create_server(config=config)
         await server.serve_stdio()
     elif args.transport == "http":
         logger.info("Using HTTP transport")
-        await server.serve_http()
+        env = os.environ.copy()
+        env[VectorConfig.ENV_EMBED_TIER] = config.embedding_tier
+        env[VectorConfig.ENV_EMBED_MODEL] = config.embedding_model
+        env[VectorConfig.ENV_CHROMA_DIR] = str(config.chroma_dir)
+        env[VectorConfig.ENV_DATA_DIR] = str(config.data_dir)
+        return await serve_http_via_granian(
+            workers=args.workers,
+            backlog=args.backlog,
+            threads=args.threads,
+            log_level=str(args.log_level),
+            env=env,
+        )
     else:
         raise SystemExit(f"Unsupported transport: {args.transport}")
 

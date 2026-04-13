@@ -1,4 +1,4 @@
-"""Tests for singleton HTTP transport runtime."""
+"""Tests for HTTP transport runtime and Granian launch helpers."""
 
 from __future__ import annotations
 
@@ -19,56 +19,65 @@ def reset_http_singleton() -> None:
 
 
 @pytest.mark.asyncio
-async def test_serve_http_uses_singleton_granian_server() -> None:
-    fake_mcp_server = AsyncMock()
-    fake_granian_server = AsyncMock()
-    fake_granian_server.serve = AsyncMock(return_value=None)
+async def test_serve_http_via_granian_builds_expected_command() -> None:
+    fake_process = AsyncMock()
+    fake_process.wait = AsyncMock(return_value=0)
 
     with patch(
-        "everspring_mcp.http.serve_http.GranianEmbeddedServer",
-        return_value=fake_granian_server,
-    ) as mock_granian_server:
-        await serve_http_module.serve_http(
-            fake_mcp_server,
-            server_name="singleton-test",
+        "everspring_mcp.http.serve_http.asyncio.create_subprocess_exec",
+        return_value=fake_process,
+    ) as mock_create_subprocess:
+        exit_code = await serve_http_module.serve_http_via_granian(
             host="127.0.0.1",
             port=9000,
-        )
-        await serve_http_module.serve_http(
-            fake_mcp_server,
-            server_name="singleton-test",
-            host="127.0.0.1",
-            port=9000,
+            workers=2,
+            backlog=512,
+            threads=4,
+            log_level="INFO",
         )
 
-    assert mock_granian_server.call_count == 1
-    assert fake_granian_server.serve.await_count == 2
+    assert exit_code == 0
+    assert mock_create_subprocess.call_count == 1
+    command_args = mock_create_subprocess.call_args.args
+    assert "--workers" in command_args
+    assert "2" in command_args
+    assert "--backlog" in command_args
+    assert "512" in command_args
+    assert "--runtime-threads" in command_args
+    assert "4" in command_args
+    assert "--host" in command_args
+    assert "127.0.0.1" in command_args
+    assert "--port" in command_args
+    assert "9000" in command_args
+    assert "--log-level" in command_args
+    assert "info" in command_args
+    assert "everspring_mcp.http.serve_http:create_http_app" in command_args
+    assert fake_process.wait.await_count == 1
 
 
 @pytest.mark.asyncio
-async def test_serve_http_rejects_host_port_change_after_singleton_init() -> None:
-    fake_mcp_server = AsyncMock()
-    fake_granian_server = AsyncMock()
-    fake_granian_server.serve = AsyncMock(return_value=None)
+async def test_serve_http_via_granian_uses_env_defaults() -> None:
+    fake_process = AsyncMock()
+    fake_process.wait = AsyncMock(return_value=0)
 
-    with patch(
-        "everspring_mcp.http.serve_http.GranianEmbeddedServer",
-        return_value=fake_granian_server,
+    with patch.dict(
+        "os.environ",
+        {
+            "EVERSPRING_HTTP_HOST": "0.0.0.0",
+            "EVERSPRING_HTTP_PORT": "7777",
+        },
+        clear=False,
     ):
-        await serve_http_module.serve_http(
-            fake_mcp_server,
-            server_name="singleton-test",
-            host="127.0.0.1",
-            port=9000,
-        )
+        with patch(
+            "everspring_mcp.http.serve_http.asyncio.create_subprocess_exec",
+            return_value=fake_process,
+        ) as mock_create_subprocess:
+            exit_code = await serve_http_module.serve_http_via_granian()
 
-        with pytest.raises(RuntimeError, match="different host/port"):
-            await serve_http_module.serve_http(
-                fake_mcp_server,
-                server_name="singleton-test",
-                host="127.0.0.1",
-                port=9001,
-            )
+    assert exit_code == 0
+    command_args = mock_create_subprocess.call_args.args
+    assert "0.0.0.0" in command_args
+    assert "7777" in command_args
 
 
 def test_http_runtime_exposes_sse_and_message_path_aliases() -> None:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
@@ -326,7 +327,6 @@ class MCPServer:
             )
 
         try:
-            
             search_params = SearchParameters(
                 query=params.query,
                 top_k=params.top_k,
@@ -403,12 +403,16 @@ class MCPServer:
         self._ensure_retriever()
         self._start_preheat()
         await self.initialize()
-        from everspring_mcp.http.serve_http import serve_http
+        from everspring_mcp.http.serve_http import serve_http_via_granian
 
-        await serve_http(
-            self._server,
-            server_name=self.name,
-        )
+        os.environ[VectorConfig.ENV_EMBED_TIER] = self.config.embedding_tier
+        os.environ[VectorConfig.ENV_EMBED_MODEL] = self.config.embedding_model
+        os.environ[VectorConfig.ENV_CHROMA_DIR] = str(self.config.chroma_dir)
+        os.environ[VectorConfig.ENV_DATA_DIR] = str(self.config.data_dir)
+
+        exit_code = await serve_http_via_granian()
+        if exit_code != 0:
+            raise RuntimeError(f"Granian exited with status code {exit_code}")
 
     def run(self, transport: str = "stdio") -> None:
         """Synchronous wrapper for stdio/http MCP serving."""
