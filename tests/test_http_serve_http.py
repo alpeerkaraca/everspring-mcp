@@ -19,15 +19,15 @@ def reset_http_singleton() -> None:
 
 
 @pytest.mark.asyncio
-async def test_serve_http_uses_singleton_uvicorn_server() -> None:
+async def test_serve_http_uses_singleton_granian_server() -> None:
     fake_mcp_server = AsyncMock()
-    fake_uvicorn_server = AsyncMock()
-    fake_uvicorn_server.serve = AsyncMock(return_value=None)
+    fake_granian_server = AsyncMock()
+    fake_granian_server.serve = AsyncMock(return_value=None)
 
     with patch(
-        "everspring_mcp.http.serve_http.uvicorn.Server",
-        return_value=fake_uvicorn_server,
-    ) as mock_uvicorn_server:
+        "everspring_mcp.http.serve_http.GranianEmbeddedServer",
+        return_value=fake_granian_server,
+    ) as mock_granian_server:
         await serve_http_module.serve_http(
             fake_mcp_server,
             server_name="singleton-test",
@@ -41,19 +41,19 @@ async def test_serve_http_uses_singleton_uvicorn_server() -> None:
             port=9000,
         )
 
-    assert mock_uvicorn_server.call_count == 1
-    assert fake_uvicorn_server.serve.await_count == 2
+    assert mock_granian_server.call_count == 1
+    assert fake_granian_server.serve.await_count == 2
 
 
 @pytest.mark.asyncio
 async def test_serve_http_rejects_host_port_change_after_singleton_init() -> None:
     fake_mcp_server = AsyncMock()
-    fake_uvicorn_server = AsyncMock()
-    fake_uvicorn_server.serve = AsyncMock(return_value=None)
+    fake_granian_server = AsyncMock()
+    fake_granian_server.serve = AsyncMock(return_value=None)
 
     with patch(
-        "everspring_mcp.http.serve_http.uvicorn.Server",
-        return_value=fake_uvicorn_server,
+        "everspring_mcp.http.serve_http.GranianEmbeddedServer",
+        return_value=fake_granian_server,
     ):
         await serve_http_module.serve_http(
             fake_mcp_server,
