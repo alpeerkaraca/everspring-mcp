@@ -449,3 +449,28 @@ Point the pipeline to your own S3 bucket by overriding:
 ```bash
 export EVERSPRING_S3_BUCKET=your-enterprise-bucket
 ```
+
+## 🚀 CI/CD & Infrastructure Setup
+
+This project operates on a fully automated Continuous Integration and Continuous Deployment (CI/CD) pipeline. The infrastructure has been modernized with the following technologies to ensure a secure and high-performance environment:
+
+### 🛠️ Deployment Architecture
+- **Environment:** Rootless Podman (a container runtime that does not require root privileges, enhancing security).
+- **Application Server:** Granian (a high-performance Python HTTP server).
+- **Resource Management:** Hard limits of **4GB RAM** and **2 CPUs** are applied per container, specifically to accommodate the memory requirements of the BGE-M3 embedding model.
+- **Data Persistence:** Application data is securely stored on the host using `everspring-data-[tier]` volumes.
+
+### ⛓️ CI/CD Pipeline Flow
+1. **GitHub Actions:** Pushing code to the `main` branch triggers a Docker image build, which is then pushed to the **GHCR (GitHub Container Registry)**.
+2. **Webhook:** Upon a successful build, a webhook payload is sent to automatically trigger the Jenkins server.
+3. **Jenkins Pipeline:** Executing steps defined in the `Jenkinsfile`, Jenkins:
+    - Pulls the latest image from GHCR.
+    - Stops and cleans up the existing container.
+    - Deploys the new image with strict resource limits and dynamic environment variables (Tier, Workers, Threads).
+
+### 🔐 Security & Permissions
+- **User Namespace Mapping:** ID mappings are configured in `/etc/subuid` and `/etc/subgid` (range `100000-165535`) to allow the `jenkins` user to manage rootless Podman layers. *(For detailed host setup and configuration instructions, please refer to [docs/setup.md](docs/setup.md)).*
+- **Matrix-Based Security:** Project privacy on Jenkins is enforced using Matrix Authorization:
+    - **Admin:** Full access.
+    - **Anonymous:** Restricted to `Job/Read` access (solely to allow GitHub to fetch and display the build status badge).
+- **SSH Credentials:** Communication between Jenkins and GitHub is securely handled via SSH keys stored within the Jenkins Credentials Store.
