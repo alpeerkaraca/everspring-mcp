@@ -58,7 +58,7 @@ class LocalSearchCLI:
         # Create server instance (runs in-process)
         self._server = MCPServer(config=self.config)
         self._initialized = False
-        logger.info(f"MCPClient initialized in {time.perf_counter() - start:.2f}s")
+        logger.info(f"Search Client initialized in {time.perf_counter() - start:.2f}s")
 
     def _print_progress(self, notification: ProgressNotification) -> None:
         """Print progress notification to output stream."""
@@ -270,7 +270,7 @@ async def interactive_search() -> None:
         format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
     )
 
-    client = MCPClient(show_progress=True)
+    client = LocalSearchCLI(show_progress=True)
 
     logger.info("EverSpring MCP - Spring Documentation Search")
     logger.info("=" * 50)
@@ -349,4 +349,4 @@ def run_interactive() -> None:
     asyncio.run(interactive_search())
 
 
-__all__ = ["MCPClient", "interactive_search", "run_interactive"]
+__all__ = ["LocalSearchCLI", "interactive_search", "run_interactive"]

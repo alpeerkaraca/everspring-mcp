@@ -9,7 +9,7 @@ This module provides models for scraped documentation content:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from typing import Self
 
@@ -28,7 +28,7 @@ from everspring_mcp.models.spring import SpringModule, SpringVersion
 
 class ContentType(str, Enum):
     """Type of documentation content."""
-    
+
     GUIDE = "guide"
     REFERENCE = "reference"
     API_DOC = "api-doc"
@@ -39,7 +39,7 @@ class ContentType(str, Enum):
 
 class CodeLanguage(str, Enum):
     """Supported code languages in examples."""
-    
+
     JAVA = "java"
     KOTLIN = "kotlin"
     GROOVY = "groovy"
@@ -53,7 +53,7 @@ class CodeLanguage(str, Enum):
 
 class DeprecationStatus(str, Enum):
     """Status of a deprecated feature."""
-    
+
     DEPRECATED = "deprecated"
     FOR_REMOVAL = "for-removal"
     REMOVED = "removed"
@@ -65,7 +65,7 @@ class DeprecationInfo(VersionedModel):
     Used by the Deprecation Guard feature to warn LLMs
     about outdated patterns.
     """
-    
+
     status: DeprecationStatus = Field(
         default=DeprecationStatus.DEPRECATED,
         description="Current deprecation status",
@@ -89,7 +89,7 @@ class DeprecationInfo(VersionedModel):
         default=None,
         description="URL to migration documentation",
     )
-    
+
     @model_validator(mode="after")
     def validate_versions(self) -> Self:
         """Ensure removal version is after deprecation version."""
@@ -302,7 +302,7 @@ class ScrapedPage(TimestampedModel):
     Stores both raw HTML and converted Markdown, with SHA-256
     hash verification for data integrity.
     """
-    
+
     url: HttpUrl = Field(
         description="Source URL of the page",
     )
@@ -338,10 +338,10 @@ class ScrapedPage(TimestampedModel):
         description="Parsed document sections",
     )
     scraped_at: datetime = Field(
-        default_factory=lambda: datetime.now(timezone.utc),
+        default_factory=lambda: datetime.now(UTC),
         description="When the page was scraped",
     )
-    
+
     @model_validator(mode="after")
     def validate_content_hash(self) -> Self:
         """Verify content hash matches markdown content."""
@@ -351,7 +351,7 @@ class ScrapedPage(TimestampedModel):
                 f"Content hash mismatch. Expected {computed}, got {self.content_hash}"
             )
         return self
-    
+
     @model_validator(mode="after")
     def validate_version_module(self) -> Self:
         """Ensure version module matches page module."""
@@ -361,13 +361,13 @@ class ScrapedPage(TimestampedModel):
                 f"page module {self.module}"
             )
         return self
-    
+
     @computed_field
     @property
     def html_hash(self) -> str:
         """SHA-256 hash of raw HTML content."""
         return compute_hash(self.raw_html)
-    
+
     @classmethod
     def create(
         cls,

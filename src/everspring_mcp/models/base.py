@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Annotated, ClassVar, Self
 
 from pydantic import (
@@ -19,10 +19,8 @@ from pydantic import (
     ConfigDict,
     Field,
     computed_field,
-    field_validator,
     model_validator,
 )
-
 
 # Custom field types
 SHA256Hash = Annotated[
@@ -53,21 +51,21 @@ class VersionedModel(BaseModel):
     All models inherit from this to ensure data can be migrated
     when schema changes occur in future versions.
     """
-    
+
     model_config = ConfigDict(
         frozen=True,
         strict=True,
         validate_default=True,
         extra="forbid",
     )
-    
+
     CURRENT_SCHEMA_VERSION: ClassVar[int] = 1
     schema_version: int = Field(
         default=1,
         ge=1,
         description="Schema version for backward compatibility",
     )
-    
+
     @model_validator(mode="after")
     def check_schema_version(self) -> Self:
         """Validate schema version and warn if outdated."""
@@ -82,16 +80,16 @@ class VersionedModel(BaseModel):
 
 class TimestampedModel(VersionedModel):
     """Model with automatic timestamp tracking."""
-    
+
     created_at: datetime = Field(
-        default_factory=lambda: datetime.now(timezone.utc),
+        default_factory=lambda: datetime.now(UTC),
         description="UTC timestamp when the record was created",
     )
     updated_at: datetime = Field(
-        default_factory=lambda: datetime.now(timezone.utc),
+        default_factory=lambda: datetime.now(UTC),
         description="UTC timestamp when the record was last updated",
     )
-    
+
     @model_validator(mode="after")
     def validate_timestamps(self) -> Self:
         """Ensure updated_at is not before created_at."""
@@ -106,7 +104,7 @@ class HashableContent(VersionedModel):
     Used for content integrity validation as required by
     EverSpring's data integrity principles.
     """
-    
+
     content: str = Field(
         min_length=1,
         description="The content to be hashed",
@@ -115,13 +113,13 @@ class HashableContent(VersionedModel):
         default=None,
         description="Pre-computed SHA-256 hash for verification",
     )
-    
+
     @computed_field
     @property
     def computed_hash(self) -> str:
         """Compute SHA-256 hash of the content."""
         return hashlib.sha256(self.content.encode("utf-8")).hexdigest()
-    
+
     def verify_hash(self) -> bool:
         """Verify that stored hash matches computed hash.
         
@@ -131,7 +129,7 @@ class HashableContent(VersionedModel):
         if self.content_hash is None:
             return True
         return self.content_hash == self.computed_hash
-    
+
     def with_hash(self) -> Self:
         """Return a new instance with content_hash set to computed value.
         

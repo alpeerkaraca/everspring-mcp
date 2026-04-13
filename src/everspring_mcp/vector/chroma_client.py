@@ -16,14 +16,14 @@ logger = get_logger("vector.chroma")
 
 class ChromaClient:
     """Wrapper around ChromaDB persistent client."""
-    
+
     def __init__(self, config: VectorConfig) -> None:
         start = time.perf_counter()
         self.config = config
         self._client = chromadb.PersistentClient(path=str(config.chroma_dir))
         self._collection: Collection | None = None
         logger.info(f"ChromaClient initialized in {time.perf_counter() - start:.2f}s")
-    
+
     def get_collection(self) -> Collection:
         if self._collection is None:
             logger.debug(f"Getting collection: {self.config.collection_name}")
@@ -31,7 +31,7 @@ class ChromaClient:
                 name=self.config.collection_name,
             )
         return self._collection
-    
+
     def upsert(
         self,
         ids: list[str],
@@ -47,7 +47,7 @@ class ChromaClient:
             documents=documents,
             metadatas=metadatas,
         )
-    
+
     def query(
         self,
         query_embeddings: list[list[float]],

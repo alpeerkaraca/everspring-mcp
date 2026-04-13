@@ -51,27 +51,41 @@ class _HttpTransportRuntime:
         async def _healthz() -> dict[str, str]:
             return {"status": "ok"}
 
-        async def _handle_sse(request: Request) -> Response:
-            mcp_server = self._require_mcp_server()
-            async with self._transport.connect_sse(
-                request.scope,
-                request.receive,
-                request._send,  # noqa: SLF001
-            ) as (
-                read_stream,
-                write_stream,
-            ):
-                await mcp_server.run(
-                    read_stream,
-                    write_stream,
-                    mcp_server.create_initialization_options(
-                        notification_options=NotificationOptions(),
-                    ),
-                )
-            return Response()
+        class _SSEEndpoint:
+            def __init__(self, runtime: _HttpTransportRuntime) -> None:
+                self._runtime = runtime
 
-        self.app.add_api_route("/sse", _handle_sse, methods=["GET"])
-        self.app.add_api_route("/sse/", _handle_sse, methods=["GET"])
+            async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+                mcp_server = self._runtime._require_mcp_server()
+                try:
+                    async with self._runtime._transport.connect_sse(
+                        scope,
+                        receive,
+                        send,
+                    ) as (
+                        read_stream,
+                        write_stream,
+                    ):
+                        await mcp_server.run(
+                            read_stream,
+                            write_stream,
+                            mcp_server.create_initialization_options(
+                                notification_options=NotificationOptions(),
+                            ),
+                        )
+                except (ClosedResourceError, BrokenResourceError):
+                    logger.debug("SSE client disconnected")
+                except RuntimeError as exc:
+                    # Granian can surface a late ASGI flow race when a client disconnects
+                    # exactly as a response is being finalized.
+                    if "Response already started" in str(exc):
+                        logger.debug("Ignoring SSE response-finalization race: %s", exc)
+                        return
+                    raise
+
+        sse_endpoint = _SSEEndpoint(self)
+        self.app.router.add_route("/sse", sse_endpoint, methods=["GET"])
+        self.app.router.add_route("/sse/", sse_endpoint, methods=["GET"])
 
         async def _handle_message_post(request: Request) -> Response:
             session_id_param = request.query_params.get("session_id")

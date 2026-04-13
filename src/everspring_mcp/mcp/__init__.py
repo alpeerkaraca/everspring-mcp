@@ -6,8 +6,8 @@ This module provides:
 - Tools: Vector search with score thresholds and progress notifications
 """
 
-from everspring_mcp.mcp.terminal_search import LocalSearchCLI
 from everspring_mcp.mcp.server import MCPServer
+from everspring_mcp.mcp.terminal_search import LocalSearchCLI
 from everspring_mcp.mcp.tools import SpringDocsTool
 
 __all__ = [

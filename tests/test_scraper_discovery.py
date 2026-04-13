@@ -6,7 +6,11 @@ import pytest
 
 from everspring_mcp.models.content import ContentType
 from everspring_mcp.models.spring import SpringModule, SpringVersion
-from everspring_mcp.scraper.discovery import DiscoveryConfig, SpringDocDiscovery, should_skip_url
+from everspring_mcp.scraper.discovery import (
+    DiscoveryConfig,
+    SpringDocDiscovery,
+    should_skip_url,
+)
 from everspring_mcp.scraper.exceptions import NavigationError
 
 

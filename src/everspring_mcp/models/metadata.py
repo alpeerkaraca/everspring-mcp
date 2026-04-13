@@ -9,7 +9,7 @@ This module provides models for document metadata and search:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Self
 
 from pydantic import Field, computed_field, model_validator
@@ -34,7 +34,7 @@ from everspring_mcp.models.spring import SpringModule, SpringVersion, VersionRan
 
 class DocumentMetadata(TimestampedModel):
     """Core metadata for a Spring documentation page."""
-    
+
     id: str = Field(
         pattern=r"^[a-z0-9\-_]+$",
         description="Unique document identifier",
@@ -64,14 +64,14 @@ class DocumentMetadata(TimestampedModel):
         description="SHA-256 hash of document content",
     )
     last_scraped: datetime = Field(
-        default_factory=lambda: datetime.now(timezone.utc),
+        default_factory=lambda: datetime.now(UTC),
         description="When document was last scraped",
     )
     tags: list[str] = Field(
         default_factory=list,
         description="Categorization tags",
     )
-    
+
     @model_validator(mode="after")
     def validate_version_module(self) -> Self:
         """Ensure version module matches document module."""
@@ -89,7 +89,7 @@ class DeprecatedAPI(TimestampedModel):
     Used by Deprecation Guard to maintain a registry
     of deprecated patterns and their replacements.
     """
-    
+
     id: str = Field(
         pattern=r"^[a-z0-9\-_\.]+$",
         description="Unique API identifier (e.g., 'spring-boot.web-security-config')",
@@ -122,7 +122,7 @@ class DeprecatedAPI(TimestampedModel):
         default=None,
         description="Example showing the recommended replacement",
     )
-    
+
     @model_validator(mode="after")
     def validate_module_consistency(self) -> Self:
         """Ensure all module references are consistent."""
@@ -131,7 +131,7 @@ class DeprecatedAPI(TimestampedModel):
         if self.affected_versions.module != self.module:
             raise ValueError("affected_versions module must match api module")
         return self
-    
+
     @property
     def is_removed(self) -> bool:
         """Check if this API has been removed."""
@@ -144,7 +144,7 @@ class DocumentIndex(TimestampedModel):
     Combines metadata, sections, and computed fields
     for efficient retrieval and display.
     """
-    
+
     metadata: DocumentMetadata = Field(
         description="Document metadata",
     )
@@ -159,19 +159,19 @@ class DocumentIndex(TimestampedModel):
         default_factory=list,
         description="Deprecated APIs mentioned in this document",
     )
-    
+
     @computed_field
     @property
     def content_hash(self) -> str:
         """Compute content hash for integrity verification."""
         return compute_hash(self.full_content)
-    
+
     @computed_field
     @property
     def word_count(self) -> int:
         """Approximate word count."""
         return len(self.full_content.split())
-    
+
     @computed_field
     @property
     def section_count(self) -> int:
@@ -182,7 +182,7 @@ class DocumentIndex(TimestampedModel):
                 total += count_sections(section.subsections)
             return total
         return count_sections(self.sections)
-    
+
     @computed_field
     @property
     def code_example_count(self) -> int:
@@ -191,7 +191,7 @@ class DocumentIndex(TimestampedModel):
         for section in self.sections:
             count += len(section.all_code_examples)
         return count
-    
+
     @property
     def all_tags(self) -> list[str]:
         """Get all tags including module and content type."""
@@ -199,7 +199,7 @@ class DocumentIndex(TimestampedModel):
         tags.append(self.metadata.module.value)
         tags.append(self.metadata.content_type.value)
         return list(set(tags))
-    
+
     def has_deprecations(self) -> bool:
         """Check if document mentions any deprecations."""
         return len(self.deprecated_apis) > 0
@@ -211,7 +211,7 @@ class SearchableDocument(VersionedModel):
     Contains fields needed for embedding generation and
     metadata filtering in ChromaDB.
     """
-    
+
     id: str = Field(
         description="Unique document/chunk identifier",
     )
@@ -229,7 +229,7 @@ class SearchableDocument(VersionedModel):
     content_hash: SHA256Hash = Field(
         description="SHA-256 hash of content",
     )
-    
+
     # Metadata for filtering (as required by AGENTS.md)
     module: SpringModule = Field(
         description="Spring module for filtering",
@@ -249,7 +249,7 @@ class SearchableDocument(VersionedModel):
     content_type: ContentType = Field(
         description="Content type for filtering",
     )
-    
+
     # Additional metadata
     title: str = Field(
         description="Document/section title",
@@ -273,7 +273,7 @@ class SearchableDocument(VersionedModel):
         default_factory=list,
         description="Searchable tags",
     )
-    
+
     @model_validator(mode="after")
     def validate_content_hash(self) -> Self:
         """Verify content hash matches content."""
@@ -283,7 +283,7 @@ class SearchableDocument(VersionedModel):
                 f"Content hash mismatch. Expected {computed}, got {self.content_hash}"
             )
         return self
-    
+
     @classmethod
     def from_document_index(
         cls,
@@ -323,7 +323,7 @@ class SearchableDocument(VersionedModel):
             has_deprecation=doc.has_deprecations(),
             tags=doc.all_tags,
         )
-    
+
     def to_chroma_metadata(self) -> dict:
         """Convert to ChromaDB metadata dict.
         
@@ -351,7 +351,7 @@ class SearchResult(VersionedModel):
     
     Combines content with metadata and ranking scores.
     """
-    
+
     id: str = Field(
         description="Chunk identifier (doc_id-chunk_index)",
     )

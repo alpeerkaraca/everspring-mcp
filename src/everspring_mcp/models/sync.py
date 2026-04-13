@@ -9,20 +9,24 @@ This module provides models for S3 synchronization:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
-
-from pydantic import Field, computed_field, model_validator
 from typing import Self
 
-from everspring_mcp.models.base import SHA256Hash, TimestampedModel, VersionedModel, compute_hash
+from pydantic import Field, computed_field, model_validator
+
+from everspring_mcp.models.base import (
+    SHA256Hash,
+    TimestampedModel,
+    VersionedModel,
+)
 from everspring_mcp.models.metadata import DocumentMetadata
 from everspring_mcp.models.spring import SpringModule, SpringVersion
 
 
 class SyncStatus(str, Enum):
     """Status of a sync operation."""
-    
+
     PENDING = "pending"
     IN_PROGRESS = "in_progress"
     COMPLETED = "completed"
@@ -31,7 +35,7 @@ class SyncStatus(str, Enum):
 
 class ChangeType(str, Enum):
     """Type of change in sync delta."""
-    
+
     ADDED = "added"
     MODIFIED = "modified"
     REMOVED = "removed"
@@ -39,7 +43,7 @@ class ChangeType(str, Enum):
 
 class S3ObjectRef(VersionedModel):
     """Reference to an S3 object."""
-    
+
     bucket: str = Field(
         pattern=r"^[a-z0-9][a-z0-9\-\.]{1,61}[a-z0-9]$",
         description="S3 bucket name",
@@ -65,19 +69,19 @@ class S3ObjectRef(VersionedModel):
         default=None,
         description="SHA-256 hash of object content",
     )
-    
+
     @property
     def s3_uri(self) -> str:
         """Full S3 URI."""
         return f"s3://{self.bucket}/{self.key}"
-    
+
     def __str__(self) -> str:
         return self.s3_uri
 
 
 class FileEntry(VersionedModel):
     """Entry in a sync manifest file list."""
-    
+
     path: str = Field(
         min_length=1,
         description="Relative file path within the pack",
@@ -100,7 +104,7 @@ class SyncManifest(TimestampedModel):
     
     Used for incremental sync to minimize S3 egress costs.
     """
-    
+
     version: str = Field(
         pattern=r"^\d+\.\d+\.\d+$",
         description="Manifest version (semver format)",
@@ -121,10 +125,10 @@ class SyncManifest(TimestampedModel):
         description="List of files with hashes",
     )
     generated_at: datetime = Field(
-        default_factory=lambda: datetime.now(timezone.utc),
+        default_factory=lambda: datetime.now(UTC),
         description="When manifest was generated",
     )
-    
+
     @model_validator(mode="after")
     def validate_file_count(self) -> Self:
         """Ensure file_count matches actual files."""
@@ -134,13 +138,13 @@ class SyncManifest(TimestampedModel):
                 f"actual file count ({len(self.files)})"
             )
         return self
-    
+
     @computed_field
     @property
     def computed_total_size(self) -> int:
         """Compute total size from file entries."""
         return sum(f.size_bytes for f in self.files)
-    
+
     def get_file_hashes(self) -> dict[str, str]:
         """Get mapping of file paths to content hashes."""
         return {f.path: f.content_hash for f in self.files}
@@ -152,7 +156,7 @@ class KnowledgePack(TimestampedModel):
     A Knowledge Pack contains all documentation for a specific
     Spring module version, ready for distribution via S3.
     """
-    
+
     id: str = Field(
         pattern=r"^[a-z0-9\-]+$",
         description="Unique pack identifier",
@@ -178,7 +182,7 @@ class KnowledgePack(TimestampedModel):
         default=None,
         description="S3 location if uploaded",
     )
-    
+
     @model_validator(mode="after")
     def validate_module_consistency(self) -> Self:
         """Ensure all documents belong to the same module."""
@@ -194,27 +198,27 @@ class KnowledgePack(TimestampedModel):
                     f"pack submodule {self.submodule}"
                 )
         return self
-    
+
     @computed_field
     @property
     def document_count(self) -> int:
         """Number of documents in this pack."""
         return len(self.documents)
-    
+
     @property
     def pack_name(self) -> str:
         """Generate pack name from module and version."""
         if self.submodule:
             return f"{self.module.value}-{self.submodule}-{self.version.version_string}"
         return f"{self.module.value}-{self.version.version_string}"
-    
+
     def __str__(self) -> str:
         return f"KnowledgePack({self.pack_name})"
 
 
 class FileChange(VersionedModel):
     """A single file change in a sync delta."""
-    
+
     path: str = Field(
         min_length=1,
         description="File path",
@@ -235,7 +239,7 @@ class FileChange(VersionedModel):
         ge=0,
         description="New file size (for added/modified)",
     )
-    
+
     @model_validator(mode="after")
     def validate_hashes_for_change_type(self) -> Self:
         """Ensure appropriate hashes are set for change type."""
@@ -256,7 +260,7 @@ class SyncDelta(TimestampedModel):
     
     Used to minimize S3 egress by only transferring changed content.
     """
-    
+
     from_version: str = Field(
         pattern=r"^\d+\.\d+\.\d+$",
         description="Source manifest version",
@@ -280,31 +284,31 @@ class SyncDelta(TimestampedModel):
         default=None,
         description="Error message if sync failed",
     )
-    
+
     @computed_field
     @property
     def added_count(self) -> int:
         """Number of added files."""
         return sum(1 for c in self.changes if c.change_type == ChangeType.ADDED)
-    
+
     @computed_field
     @property
     def modified_count(self) -> int:
         """Number of modified files."""
         return sum(1 for c in self.changes if c.change_type == ChangeType.MODIFIED)
-    
+
     @computed_field
     @property
     def removed_count(self) -> int:
         """Number of removed files."""
         return sum(1 for c in self.changes if c.change_type == ChangeType.REMOVED)
-    
+
     @computed_field
     @property
     def total_changes(self) -> int:
         """Total number of changes."""
         return len(self.changes)
-    
+
     @computed_field
     @property
     def bytes_to_download(self) -> int:
@@ -314,11 +318,11 @@ class SyncDelta(TimestampedModel):
             for c in self.changes
             if c.change_type in (ChangeType.ADDED, ChangeType.MODIFIED)
         )
-    
+
     def has_changes(self) -> bool:
         """Check if there are any changes to sync."""
         return len(self.changes) > 0
-    
+
     @classmethod
     def compute(
         cls,
@@ -338,9 +342,9 @@ class SyncDelta(TimestampedModel):
         """
         old_files = old_manifest.get_file_hashes()
         new_files = new_manifest.get_file_hashes()
-        
+
         changes: list[FileChange] = []
-        
+
         # Find added and modified files
         for path, new_hash in new_files.items():
             new_entry = next(f for f in new_manifest.files if f.path == path)
@@ -359,7 +363,7 @@ class SyncDelta(TimestampedModel):
                     new_hash=new_hash,
                     size_bytes=new_entry.size_bytes,
                 ))
-        
+
         # Find removed files
         for path, old_hash in old_files.items():
             if path not in new_files:
@@ -368,7 +372,7 @@ class SyncDelta(TimestampedModel):
                     change_type=ChangeType.REMOVED,
                     old_hash=old_hash,
                 ))
-        
+
         return cls(
             from_version=old_manifest.version,
             to_version=new_manifest.version,

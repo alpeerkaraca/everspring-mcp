@@ -10,15 +10,11 @@ This module provides SpringDocParser for parsing Spring documentation:
 from __future__ import annotations
 
 import re
-import time
-from typing import ClassVar
 
 from bs4 import BeautifulSoup, Tag
-from bs4.element import NavigableString
-from markdownify import MarkdownConverter, markdownify
+from markdownify import MarkdownConverter
 from pydantic import BaseModel, ConfigDict, Field
 
-from everspring_mcp.models.base import compute_hash
 from everspring_mcp.models.content import (
     ApiClassSignature,
     CodeExample,
@@ -33,7 +29,6 @@ from everspring_mcp.models.spring import SpringModule, SpringVersion
 from everspring_mcp.scraper.exceptions import ContentExtractionError
 from everspring_mcp.utils import sanitize_title
 from everspring_mcp.utils.logging import get_logger
-
 
 logger = get_logger("scraper.parser")
 
@@ -50,7 +45,7 @@ SPRING_DOC_SELECTORS: dict[str, list[str]] = {
     ],
     "sidebar": [
         "nav.toc",
-        "aside.toc", 
+        "aside.toc",
         ".book-toc",
         "#toc",
         ".nav-toc",
@@ -123,9 +118,9 @@ class ParserConfig(BaseModel):
         strip_tags: HTML tags to remove entirely
         unwrap_tags: HTML tags to unwrap (keep content, remove tag)
     """
-    
+
     model_config = ConfigDict(frozen=True)
-    
+
     title_selectors: list[str] = Field(
         default_factory=lambda: SPRING_DOC_SELECTORS["title"].copy(),
         description="CSS selectors for page title",
@@ -188,13 +183,13 @@ class SpringMarkdownConverter(MarkdownConverter):
     
     Handles Spring-specific elements and preserves code formatting.
     """
-    
+
     def convert_pre(self, el: Tag, text: str, convert_as_inline: bool = False, parent_tags: list | None = None) -> str:
         """Convert pre element preserving code language."""
         # Try to detect language from various attributes
         lang = ""
         code_el = el.find("code")
-        
+
         if code_el and isinstance(code_el, Tag):
             # Check class for language hint
             classes = code_el.get("class", [])
@@ -206,11 +201,11 @@ class SpringMarkdownConverter(MarkdownConverter):
                     elif cls.startswith("highlight-"):
                         lang = cls.replace("highlight-", "")
                         break
-            
+
             # Check data-lang attribute
             if not lang:
                 lang = code_el.get("data-lang", "") or ""
-        
+
         # Also check pre element itself
         if not lang:
             pre_classes = el.get("class", [])
@@ -220,45 +215,45 @@ class SpringMarkdownConverter(MarkdownConverter):
                         if re.search(pattern, cls, re.IGNORECASE):
                             lang = code_lang.value
                             break
-        
+
         # Get code content
         code = el.get_text()
-        
+
         return f"\n```{lang}\n{code.strip()}\n```\n"
-    
+
     def convert_a(self, el: Tag, text: str, convert_as_inline: bool = False, parent_tags: list | None = None) -> str:
         """Convert anchor with proper link handling."""
         href = el.get("href", "")
         title = el.get("title", "")
-        
+
         if not href:
             return text
-        
+
         # Handle anchor-only links
         if href.startswith("#"):
             return f"[{text}]({href})"
-        
+
         if title:
             return f'[{text}]({href} "{title}")'
         return f"[{text}]({href})"
-    
+
     def convert_table(self, el: Tag, text: str, convert_as_inline: bool = False, parent_tags: list | None = None) -> str:
         """Convert table to Markdown table format."""
         rows = el.find_all("tr")
         if not rows:
             return text
-        
+
         result = []
         for i, row in enumerate(rows):
             cells = row.find_all(["th", "td"])
             row_text = " | ".join(cell.get_text(strip=True) for cell in cells)
             result.append(f"| {row_text} |")
-            
+
             # Add header separator after first row
             if i == 0:
                 separator = " | ".join("---" for _ in cells)
                 result.append(f"| {separator} |")
-        
+
         return "\n" + "\n".join(result) + "\n"
 
 
@@ -277,7 +272,7 @@ class SpringDocParser:
             version=SpringVersion(module=SpringModule.BOOT, major=4),
         )
     """
-    
+
     def __init__(self, config: ParserConfig | None = None) -> None:
         """Initialize parser.
         
@@ -291,7 +286,7 @@ class SpringDocParser:
             strong_em_symbol="*",
             code_language_callback=self._detect_language,
         )
-    
+
     def _detect_language(self, el: Tag) -> str:
         """Detect programming language from element attributes."""
         classes = el.get("class", [])
@@ -301,11 +296,11 @@ class SpringDocParser:
                     if re.search(pattern, cls, re.IGNORECASE):
                         return lang.value
         return ""
-    
+
     def _create_soup(self, html: str) -> BeautifulSoup:
         """Create BeautifulSoup object from HTML."""
         return BeautifulSoup(html, "lxml")
-    
+
     def _find_first(
         self,
         soup: BeautifulSoup,
@@ -317,7 +312,7 @@ class SpringDocParser:
             if element:
                 return element
         return None
-    
+
     def _clean_html(self, soup: BeautifulSoup) -> BeautifulSoup:
         """Remove unwanted elements from HTML."""
         # Remove script, style, etc.
@@ -358,9 +353,9 @@ class SpringDocParser:
 
         if removed_noise:
             logger.debug("Pruned %d noisy nodes before markdown conversion", removed_noise)
-        
+
         return soup
-    
+
     def extract_title(self, soup: BeautifulSoup) -> str:
         """Extract page title from HTML.
         
@@ -379,7 +374,7 @@ class SpringDocParser:
             content = meta.get("content")
             if content:
                 return str(content).strip()
-        
+
         # Try configured selectors
         for selector in self.config.title_selectors:
             if selector.startswith("meta"):
@@ -387,7 +382,7 @@ class SpringDocParser:
             element = soup.select_one(selector)
             if element:
                 return element.get_text(strip=True)
-        
+
         raise ContentExtractionError("Could not extract page title")
 
     def extract_version(self, soup: BeautifulSoup, selectors: list[str] | None = None) -> str:
@@ -408,7 +403,7 @@ class SpringDocParser:
             if text:
                 return text
         raise ContentExtractionError("Could not extract version from page")
-    
+
     def extract_sidebar(self, soup: BeautifulSoup) -> list[dict]:
         """Extract sidebar navigation hierarchy.
         
@@ -422,37 +417,37 @@ class SpringDocParser:
         if not sidebar:
             logger.warning("No sidebar found")
             return []
-        
+
         def parse_nav_items(element: Tag) -> list[dict]:
             items = []
             for li in element.find_all("li", recursive=False):
                 item: dict = {}
-                
+
                 # Find link
                 link = li.find("a")
                 if link and isinstance(link, Tag):
                     item["title"] = link.get_text(strip=True)
                     item["url"] = link.get("href", "")
-                
+
                 # Find nested list
                 nested = li.find(["ul", "ol"])
                 if nested and isinstance(nested, Tag):
                     item["children"] = parse_nav_items(nested)
                 else:
                     item["children"] = []
-                
+
                 if item.get("title"):
                     items.append(item)
-            
+
             return items
-        
+
         # Find the main list
         nav_list = sidebar.find(["ul", "ol"])
         if nav_list and isinstance(nav_list, Tag):
             return parse_nav_items(nav_list)
-        
+
         return []
-    
+
     def extract_main_content(self, soup: BeautifulSoup) -> Tag:
         """Extract main content element.
         
@@ -469,7 +464,7 @@ class SpringDocParser:
         if not content:
             raise ContentExtractionError("Could not extract main content")
         return content
-    
+
     def extract_code_blocks(self, soup: BeautifulSoup) -> list[CodeExample]:
         """Extract code blocks from HTML.
         
@@ -480,26 +475,26 @@ class SpringDocParser:
             List of CodeExample models
         """
         examples = []
-        
+
         for selector in self.config.code_selectors:
             for element in soup.select(selector):
                 # Get the pre element
                 pre = element if element.name == "pre" else element.find_parent("pre")
                 if not pre:
                     continue
-                
+
                 code = element.get_text()
                 if not code.strip():
                     continue
-                
+
                 # Detect language
                 lang = self._detect_code_language(element)
-                
+
                 # Extract annotations from Java/Kotlin code
                 annotations = []
                 if lang in (CodeLanguage.JAVA, CodeLanguage.KOTLIN):
                     annotations = ANNOTATION_PATTERN.findall(code)
-                
+
                 # Get title from preceding element
                 title = None
                 prev_sibling = pre.find_previous_sibling()
@@ -508,7 +503,7 @@ class SpringDocParser:
                         title_text = prev_sibling.get_text(strip=True)
                         if len(title_text) < 100:  # Reasonable title length
                             title = title_text
-                
+
                 try:
                     example = CodeExample(
                         language=lang,
@@ -519,7 +514,7 @@ class SpringDocParser:
                     examples.append(example)
                 except Exception as e:
                     logger.warning(f"Failed to create CodeExample: {e}")
-        
+
         return examples
 
     def _normalize_whitespace(self, text: str) -> str:
@@ -979,14 +974,14 @@ class SpringDocParser:
                 lines.append(f"  - `@throws {throw_name}`")
 
         return "\n".join(lines).strip()
-    
+
     def _detect_code_language(self, element: Tag) -> CodeLanguage:
         """Detect programming language from code element."""
         # Check class attributes
         classes = element.get("class", [])
         if isinstance(classes, str):
             classes = classes.split()
-        
+
         for cls in classes:
             # Common patterns: language-java, highlight-java, java
             clean_cls = cls.lower()
@@ -994,18 +989,18 @@ class SpringDocParser:
                 if clean_cls.startswith(prefix):
                     clean_cls = clean_cls[len(prefix):]
                     break
-            
+
             for pattern, lang in LANGUAGE_PATTERNS.items():
                 if re.search(pattern, clean_cls, re.IGNORECASE):
                     return lang
-        
+
         # Check data-lang attribute
         data_lang = element.get("data-lang", "")
         if data_lang:
             for pattern, lang in LANGUAGE_PATTERNS.items():
                 if re.search(pattern, str(data_lang), re.IGNORECASE):
                     return lang
-        
+
         # Check parent pre element
         pre = element.find_parent("pre")
         if pre and isinstance(pre, Tag):
@@ -1016,10 +1011,10 @@ class SpringDocParser:
                 for pattern, lang in LANGUAGE_PATTERNS.items():
                     if re.search(pattern, cls, re.IGNORECASE):
                         return lang
-        
+
         # Default to Java for Spring docs
         return CodeLanguage.JAVA
-    
+
     def to_markdown(self, html: str | Tag) -> str:
         """Convert HTML to clean Markdown.
         
@@ -1034,17 +1029,17 @@ class SpringDocParser:
 
         # Use custom converter
         md = self._converter.convert(str(clean_soup))
-        
+
         # Clean up Spring docs copy-button artifacts
         md = re.sub(r"Copied!(?=\s|$)", "", md)
-        
+
         # Clean up excessive whitespace
         md = re.sub(r"\n{3,}", "\n\n", md)
         md = re.sub(r" +", " ", md)
         md = md.strip()
-        
+
         return md
-    
+
     def parse_sections(
         self,
         content: Tag,
@@ -1063,17 +1058,17 @@ class SpringDocParser:
         current_stack: list[tuple[int, DocumentSection | None, list[DocumentSection]]] = [
             (0, None, sections)
         ]
-        
+
         # Find all headings
         headings = content.find_all(["h1", "h2", "h3", "h4", "h5", "h6"])
-        
+
         for heading in headings:
             if not isinstance(heading, Tag):
                 continue
-            
+
             level = int(heading.name[1])
             title = heading.get_text(strip=True)
-            
+
             # Generate ID from heading
             raw_heading_id = str(heading.get("id", "") or "")
             if raw_heading_id:
@@ -1083,17 +1078,17 @@ class SpringDocParser:
             heading_id = re.sub(r"-{2,}", "-", heading_id).strip("-")
             if not heading_id:
                 heading_id = f"section-{len(sections)}"
-            
+
             # Get content until next heading
             section_content = []
             section_examples = []
-            
+
             for sibling in heading.next_siblings:
                 if isinstance(sibling, Tag):
                     if sibling.name in ["h1", "h2", "h3", "h4", "h5", "h6"]:
                         break
                     section_content.append(str(sibling))
-                    
+
                     # Check for code blocks
                     for code in sibling.find_all("pre"):
                         code_text = code.get_text()
@@ -1101,10 +1096,10 @@ class SpringDocParser:
                             if example.code.strip() == code_text.strip():
                                 section_examples.append(example)
                                 break
-            
+
             section_html = "".join(section_content)
             section_md = self.to_markdown(section_html) if section_html else title
-            
+
             try:
                 section = DocumentSection(
                     id=heading_id[:50],
@@ -1117,19 +1112,19 @@ class SpringDocParser:
             except Exception as e:
                 logger.warning(f"Failed to create section: {e}")
                 continue
-            
+
             # Find correct parent level
             while current_stack[-1][0] >= level:
                 current_stack.pop()
-            
+
             # Add to parent's subsections
             current_stack[-1][2].append(section)
-            
+
             # Push this section for potential children
             current_stack.append((level, section, section.subsections))
-        
+
         return sections
-    
+
     def parse(
         self,
         html: str,
@@ -1155,11 +1150,11 @@ class SpringDocParser:
             ContentExtractionError: If parsing fails
         """
         logger.info(f"Parsing page: {url}")
-        
+
         # Parse HTML
         soup = self._create_soup(html)
         soup = self._clean_html(soup)
-        
+
         # Extract title
         try:
             title = self.extract_title(soup)
@@ -1239,7 +1234,7 @@ class SpringDocParser:
                     content_type=content_type,
                     sections=[],
                 )
-        
+
         # Extract main content
         try:
             content_element = self.extract_main_content(soup)
@@ -1248,20 +1243,20 @@ class SpringDocParser:
             content_element = soup.find("body")
             if not content_element or not isinstance(content_element, Tag):
                 raise ContentExtractionError("No content found in page", url=url)
-        
+
         # Extract code examples
         code_examples = self.extract_code_blocks(content_element)
         logger.debug(f"Extracted {len(code_examples)} code examples")
-        
+
         # Convert to Markdown
         markdown_content = self.to_markdown(content_element)
         if not markdown_content.strip():
             raise ContentExtractionError("Empty content after conversion", url=url)
-        
+
         # Parse sections
         sections = self.parse_sections(content_element, code_examples)
         logger.debug(f"Parsed {len(sections)} top-level sections")
-        
+
         # Create ScrapedPage using factory method
         return ScrapedPage.create(
             url=url,
