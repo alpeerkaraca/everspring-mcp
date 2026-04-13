@@ -6,8 +6,11 @@ import os
 from typing import Any
 from uuid import UUID
 
+from granian.log import LogLevels
 import mcp.types as mcp_types
-import uvicorn
+from granian.constants import Interfaces
+from granian.server.embed import Server as GranianEmbeddedServer
+from granian.utils.proxies import wrap_asgi_with_proxy_headers
 from anyio import BrokenResourceError, ClosedResourceError
 from fastapi import FastAPI, Request
 from mcp.server import NotificationOptions, Server
@@ -25,7 +28,7 @@ DEFAULT_HTTP_PORT = 8000
 
 
 class _HttpTransportRuntime:
-    """Singleton HTTP runtime that owns FastAPI app and uvicorn server."""
+    """Singleton HTTP runtime that owns FastAPI app and granian server."""
 
     def __init__(self) -> None:
         # Mounted SSE app runs under /sse, so MCP should post to /sse/messages.
@@ -34,7 +37,7 @@ class _HttpTransportRuntime:
         self._server_name = "everspring-mcp"
         self._bound_host: str | None = None
         self._bound_port: int | None = None
-        self._uvicorn_server: uvicorn.Server | None = None
+        self._granian_server: GranianEmbeddedServer | None = None
         self.app = FastAPI(title=f"{self._server_name} MCP HTTP Server")
         self._mount_routes()
 
@@ -121,24 +124,26 @@ class _HttpTransportRuntime:
         if self._mcp_server is None:
             raise RuntimeError("HTTP runtime cannot start before MCP server bind")
 
-        if self._uvicorn_server is None:
+        if self._granian_server is None:
             self._bound_host = host
             self._bound_port = port
-            config = uvicorn.Config(
-                app=self.app,
-                host=host,
+
+            proxy_headers = True
+            forwarded_allow_ips = ""
+            asgi_app = wrap_asgi_with_proxy_headers(self.app, "*")
+            self._granian_server = GranianEmbeddedServer(
+                target=asgi_app,
+                address=host,
                 port=port,
-                proxy_headers=True,
-                forwarded_allow_ips="*",
-                log_level="info",
+                interface=Interfaces.ASGI,
+                log_level=LogLevels.info,
             )
-            self._uvicorn_server = uvicorn.Server(config)
         elif self._bound_host != host or self._bound_port != port:
             raise RuntimeError(
                 "HTTP singleton already initialized with a different host/port"
             )
 
-        await self._uvicorn_server.serve()
+        await self._granian_server.serve()
 
 
 _HTTP_RUNTIME_SINGLETON: _HttpTransportRuntime | None = None
