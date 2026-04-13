@@ -47,6 +47,9 @@ pipeline {
                     podman run -d \
                         --name ${CONTAINER_NAME} \
                         --restart always \
+                        --memory="4g" \
+                        --memory-swap="6g" \
+                        --cpus="2.0" \
                         -p 8000:8000 \
                         -v everspring-data-${params.TIER}:/home/everspring/.everspring \
                         ${IMAGE_NAME}:latest \
