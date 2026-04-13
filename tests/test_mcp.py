@@ -6,7 +6,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from everspring_mcp.mcp.terminal_search import LocalSearchCLI
 from everspring_mcp.mcp.models import (
     ProgressNotification,
     SearchParameters,
@@ -16,6 +15,7 @@ from everspring_mcp.mcp.models import (
     StatusResponse,
 )
 from everspring_mcp.mcp.server import create_server
+from everspring_mcp.mcp.terminal_search import LocalSearchCLI
 from everspring_mcp.mcp.tools import SpringDocsTool
 from everspring_mcp.models.metadata import SearchResult
 

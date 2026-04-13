@@ -18,19 +18,19 @@ from everspring_mcp.models.base import VersionedModel
 
 class SpringModule(str, Enum):
     """Supported Spring ecosystem modules."""
-    
+
     BOOT = "spring-boot"
     FRAMEWORK = "spring-framework"
     SECURITY = "spring-security"
     DATA = "spring-data"
     CLOUD = "spring-cloud"
     AI = "spring-ai"
-    
+
     @property
     def display_name(self) -> str:
         """Human-readable module name."""
         return self.value.replace("-", " ").title()
-    
+
     @property
     def minimum_supported_version(self) -> int:
         """Minimum major version supported by EverSpring."""
@@ -56,7 +56,7 @@ class SpringVersion(VersionedModel):
     - Spring Cloud: 4+
     - Spring AI: 1+
     """
-    
+
     module: SpringModule = Field(
         description="The Spring module this version applies to",
     )
@@ -79,7 +79,7 @@ class SpringVersion(VersionedModel):
         pattern=r"^[A-Za-z0-9\-\.]+$",
         description="Version qualifier (e.g., 'RELEASE', 'M1', 'RC1')",
     )
-    
+
     @model_validator(mode="after")
     def validate_minimum_version(self) -> Self:
         """Ensure version meets minimum requirements for the module."""
@@ -90,12 +90,12 @@ class SpringVersion(VersionedModel):
                 f"got {self.major}.{self.minor}.{self.patch}"
             )
         return self
-    
+
     @property
     def version_tuple(self) -> tuple[int, int, int]:
         """Version as comparable tuple."""
         return (self.major, self.minor, self.patch)
-    
+
     @property
     def version_string(self) -> str:
         """Version as string (e.g., '4.0.0' or '4.0.0-RELEASE')."""
@@ -103,30 +103,30 @@ class SpringVersion(VersionedModel):
         if self.qualifier:
             return f"{base}-{self.qualifier}"
         return base
-    
+
     def __str__(self) -> str:
         return f"{self.module.value}:{self.version_string}"
-    
+
     def __lt__(self, other: SpringVersion) -> bool:
         if not isinstance(other, SpringVersion):
             return NotImplemented
         if self.module != other.module:
             raise ValueError("Cannot compare versions of different modules")
         return self.version_tuple < other.version_tuple
-    
+
     def __le__(self, other: SpringVersion) -> bool:
         return self == other or self < other
-    
+
     def __gt__(self, other: SpringVersion) -> bool:
         if not isinstance(other, SpringVersion):
             return NotImplemented
         if self.module != other.module:
             raise ValueError("Cannot compare versions of different modules")
         return self.version_tuple > other.version_tuple
-    
+
     def __ge__(self, other: SpringVersion) -> bool:
         return self == other or self > other
-    
+
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, SpringVersion):
             return NotImplemented
@@ -134,10 +134,10 @@ class SpringVersion(VersionedModel):
             self.module == other.module
             and self.version_tuple == other.version_tuple
         )
-    
+
     def __hash__(self) -> int:
         return hash((self.module, self.version_tuple))
-    
+
     @classmethod
     def parse(cls, module: SpringModule, version_str: str) -> SpringVersion:
         """Parse version string into SpringVersion.
@@ -151,12 +151,12 @@ class SpringVersion(VersionedModel):
         """
         parts = version_str.split("-", 1)
         version_parts = parts[0].split(".")
-        
+
         major = int(version_parts[0])
         minor = int(version_parts[1]) if len(version_parts) > 1 else 0
         patch = int(version_parts[2]) if len(version_parts) > 2 else 0
         qualifier = parts[1] if len(parts) > 1 else None
-        
+
         return cls(
             module=module,
             major=major,
@@ -168,7 +168,7 @@ class SpringVersion(VersionedModel):
 
 class VersionRange(VersionedModel):
     """Version range constraint for compatibility checks."""
-    
+
     module: SpringModule = Field(
         description="The Spring module this range applies to",
     )
@@ -180,7 +180,7 @@ class VersionRange(VersionedModel):
         default=None,
         description="Maximum version (inclusive)",
     )
-    
+
     @model_validator(mode="after")
     def validate_range(self) -> Self:
         """Ensure range is valid and modules match."""
@@ -192,7 +192,7 @@ class VersionRange(VersionedModel):
             if self.min_version > self.max_version:
                 raise ValueError("min_version cannot be greater than max_version")
         return self
-    
+
     def contains(self, version: SpringVersion) -> bool:
         """Check if version falls within this range.
         
@@ -209,7 +209,7 @@ class VersionRange(VersionedModel):
         if self.max_version and version > self.max_version:
             return False
         return True
-    
+
     def __str__(self) -> str:
         min_str = self.min_version.version_string if self.min_version else "*"
         max_str = self.max_version.version_string if self.max_version else "*"

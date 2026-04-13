@@ -16,21 +16,18 @@ from pydantic import ValidationError
 
 from everspring_mcp.models.base import VersionedModel, compute_hash
 from everspring_mcp.models.content import (
-    CodeExample,
     CodeLanguage,
     ContentType,
     DocumentSection,
     ScrapedPage,
 )
 from everspring_mcp.models.spring import SpringModule, SpringVersion, VersionRange
+from everspring_mcp.scraper.exceptions import ContentExtractionError
 from everspring_mcp.scraper.parser import (
     LANGUAGE_PATTERNS,
-    ParserConfig,
-    SpringDocParser,
     SPRING_DOC_SELECTORS,
+    SpringDocParser,
 )
-from everspring_mcp.scraper.exceptions import ContentExtractionError
-
 
 # =============================================================================
 # SpringVersion Validation Tests
@@ -184,16 +181,16 @@ class TestVersionRange:
         """Test version range containment check."""
         min_ver = SpringVersion(module=SpringModule.BOOT, major=4, minor=0)
         max_ver = SpringVersion(module=SpringModule.BOOT, major=4, minor=5)
-        
+
         range_ = VersionRange(
             module=SpringModule.BOOT,
             min_version=min_ver,
             max_version=max_ver,
         )
-        
+
         v4_2 = SpringVersion(module=SpringModule.BOOT, major=4, minor=2)
         v4_6 = SpringVersion(module=SpringModule.BOOT, major=4, minor=6)
-        
+
         assert range_.contains(v4_2) is True
         assert range_.contains(v4_6) is False
 
@@ -226,20 +223,20 @@ class TestSpringDocParser:
     ) -> None:
         """Test title extraction from HTML."""
         from bs4 import BeautifulSoup
-        
+
         soup = BeautifulSoup(sample_spring_html, "lxml")
         title = parser.extract_title(soup)
-        
+
         assert title == "Spring Boot Reference Documentation - Exämple"
 
     def test_extract_title_from_og_meta(self, parser: SpringDocParser) -> None:
         """Test title extraction from og:title meta tag."""
         from bs4 import BeautifulSoup
-        
+
         html = '<html><head><meta property="og:title" content="OG Title"></head></html>'
         soup = BeautifulSoup(html, "lxml")
         title = parser.extract_title(soup)
-        
+
         assert title == "OG Title"
 
     def test_extract_sidebar_navigation(
@@ -249,10 +246,10 @@ class TestSpringDocParser:
     ) -> None:
         """Test sidebar navigation extraction."""
         from bs4 import BeautifulSoup
-        
+
         soup = BeautifulSoup(sample_spring_html, "lxml")
         sidebar = parser.extract_sidebar(soup)
-        
+
         assert len(sidebar) > 0
         # Check first item
         assert sidebar[0]["title"] == "Getting Started"
@@ -268,10 +265,10 @@ class TestSpringDocParser:
     ) -> None:
         """Test handling of missing sidebar."""
         from bs4 import BeautifulSoup
-        
+
         soup = BeautifulSoup(empty_sidebar_html, "lxml")
         sidebar = parser.extract_sidebar(soup)
-        
+
         assert sidebar == []
 
     def test_extract_code_blocks(
@@ -281,16 +278,16 @@ class TestSpringDocParser:
     ) -> None:
         """Test code block extraction."""
         from bs4 import BeautifulSoup
-        
+
         soup = BeautifulSoup(sample_spring_html, "lxml")
         code_blocks = parser.extract_code_blocks(soup)
-        
+
         assert len(code_blocks) >= 4  # Java, YAML, Properties, Kotlin examples
-        
+
         # Check Java detection
         java_blocks = [b for b in code_blocks if b.language == CodeLanguage.JAVA]
         assert len(java_blocks) >= 2
-        
+
         # Check annotation extraction
         annotations_found = []
         for block in java_blocks:
@@ -305,10 +302,10 @@ class TestSpringDocParser:
     ) -> None:
         """Test YAML code block detection."""
         from bs4 import BeautifulSoup
-        
+
         soup = BeautifulSoup(sample_spring_html, "lxml")
         code_blocks = parser.extract_code_blocks(soup)
-        
+
         yaml_blocks = [b for b in code_blocks if b.language == CodeLanguage.YAML]
         assert len(yaml_blocks) >= 1
         assert "spring:" in yaml_blocks[0].code
@@ -320,10 +317,10 @@ class TestSpringDocParser:
     ) -> None:
         """Test Kotlin code block detection."""
         from bs4 import BeautifulSoup
-        
+
         soup = BeautifulSoup(sample_spring_html, "lxml")
         code_blocks = parser.extract_code_blocks(soup)
-        
+
         kotlin_blocks = [b for b in code_blocks if b.language == CodeLanguage.KOTLIN]
         assert len(kotlin_blocks) >= 1
         assert "fun main" in kotlin_blocks[0].code
@@ -335,7 +332,7 @@ class TestSpringDocParser:
     ) -> None:
         """Test HTML to Markdown conversion."""
         markdown = parser.to_markdown(sample_spring_html)
-        
+
         assert "# Spring Boot Reference Documentation - Exämple" in markdown
         assert "## Getting Started" in markdown
         assert "@SpringBootApplication" in markdown
@@ -414,7 +411,7 @@ class TestSpringDocParser:
             submodule="redis",
             content_type=ContentType.REFERENCE,
         )
-        
+
         assert isinstance(scraped_page, ScrapedPage)
         assert scraped_page.title == "Spring Boot Reference Documentation - Ex-mple"
         assert scraped_page.module == SpringModule.BOOT
@@ -436,11 +433,11 @@ class TestSpringDocParser:
             module=SpringModule.BOOT,
             version=spring_boot_version,
         )
-        
+
         # Content hash should be 64 hex characters
         assert len(scraped_page.content_hash) == 64
         assert all(c in "0123456789abcdef" for c in scraped_page.content_hash)
-        
+
         # Hash should match computed hash of markdown content
         expected_hash = compute_hash(scraped_page.markdown_content)
         assert scraped_page.content_hash == expected_hash
@@ -458,9 +455,9 @@ class TestSpringDocParser:
             module=SpringModule.BOOT,
             version=spring_boot_version,
         )
-        
+
         assert len(scraped_page.sections) > 0
-        
+
         # Check section structure
         for section in scraped_page.sections:
             assert isinstance(section, DocumentSection)
@@ -509,7 +506,7 @@ class TestSpringDocParser:
             module=SpringModule.BOOT,
             version=spring_boot_version,
         )
-        
+
         assert scraped_page.title == "Minimal Content"
         assert "minimal content" in scraped_page.markdown_content.lower()
 
@@ -797,7 +794,7 @@ class TestLanguageDetection:
     ) -> None:
         """Test language detection from class names."""
         import re
-        
+
         # Extract the language part
         for prefix in ("language-", "highlight-", "lang-"):
             if class_name.startswith(prefix):
@@ -805,14 +802,14 @@ class TestLanguageDetection:
                 break
         else:
             lang_str = class_name
-        
+
         # Find matching pattern
         matched_lang = None
         for pattern, lang in LANGUAGE_PATTERNS.items():
             if re.search(pattern, lang_str, re.IGNORECASE):
                 matched_lang = lang
                 break
-        
+
         assert matched_lang == expected_lang
 
 
@@ -857,7 +854,7 @@ class TestContentHashVerification:
         """Test hash computation from string."""
         content = "Hello, World!"
         hash_value = compute_hash(content)
-        
+
         assert len(hash_value) == 64
         # Known SHA-256 of "Hello, World!"
         assert hash_value == "dffd6021bb2bd5b0af676290809ec3a53191dd81c7f70a4b28688a362182986f"
@@ -866,24 +863,24 @@ class TestContentHashVerification:
         """Test hash computation from bytes."""
         content = b"Hello, World!"
         hash_value = compute_hash(content)
-        
+
         assert len(hash_value) == 64
         assert hash_value == "dffd6021bb2bd5b0af676290809ec3a53191dd81c7f70a4b28688a362182986f"
 
     def test_hash_consistency(self) -> None:
         """Test hash is consistent for same content."""
         content = "Test content for hashing"
-        
+
         hash1 = compute_hash(content)
         hash2 = compute_hash(content)
-        
+
         assert hash1 == hash2
 
     def test_hash_different_for_different_content(self) -> None:
         """Test hash differs for different content."""
         hash1 = compute_hash("Content A")
         hash2 = compute_hash("Content B")
-        
+
         assert hash1 != hash2
 
     def test_scraped_page_hash_validation(
@@ -899,7 +896,7 @@ class TestContentHashVerification:
             module=SpringModule.BOOT,
             version=spring_boot_version,
         )
-        
+
         # Try to create ScrapedPage with wrong hash - should fail
         with pytest.raises(ValidationError):
             ScrapedPage(

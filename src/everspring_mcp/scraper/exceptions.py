@@ -13,11 +13,11 @@ from __future__ import annotations
 
 class ScraperError(Exception):
     """Base exception for all scraper-related errors."""
-    
+
     def __init__(self, message: str, url: str | None = None) -> None:
         self.url = url
         super().__init__(message)
-    
+
     def __str__(self) -> str:
         if self.url:
             return f"{self.args[0]} (URL: {self.url})"
@@ -30,7 +30,7 @@ class NavigationError(ScraperError):
     This includes DNS failures, connection errors, and HTTP errors
     (except rate limiting which has its own exception).
     """
-    
+
     def __init__(
         self,
         message: str,
@@ -47,7 +47,7 @@ class NavigationTimeoutError(ScraperError):
     This occurs when the page doesn't reach the expected state
     (e.g., networkidle) within the configured timeout.
     """
-    
+
     def __init__(
         self,
         message: str,
@@ -64,7 +64,7 @@ class RateLimitError(ScraperError):
     This occurs when the server returns HTTP 429 or other
     indicators of rate limiting.
     """
-    
+
     def __init__(
         self,
         message: str,
@@ -81,7 +81,7 @@ class ContentExtractionError(ScraperError):
     This includes selector not found, empty content,
     or malformed HTML structure.
     """
-    
+
     def __init__(
         self,
         message: str,

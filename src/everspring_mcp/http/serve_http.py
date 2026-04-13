@@ -2,15 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
+import sys
 from typing import Any
 from uuid import UUID
 
-from granian.log import LogLevels
 import mcp.types as mcp_types
-from granian.constants import Interfaces
-from granian.server.embed import Server as GranianEmbeddedServer
-from granian.utils.proxies import wrap_asgi_with_proxy_headers
 from anyio import BrokenResourceError, ClosedResourceError
 from fastapi import FastAPI, Request
 from mcp.server import NotificationOptions, Server
@@ -28,16 +26,13 @@ DEFAULT_HTTP_PORT = 8000
 
 
 class _HttpTransportRuntime:
-    """Singleton HTTP runtime that owns FastAPI app and granian server."""
+    """Singleton HTTP runtime that owns FastAPI app and MCP transport wiring."""
 
     def __init__(self) -> None:
         # Mounted SSE app runs under /sse, so MCP should post to /sse/messages.
         self._transport = SseServerTransport("/sse/messages")
         self._mcp_server: Server[Any, Any] | None = None
         self._server_name = "everspring-mcp"
-        self._bound_host: str | None = None
-        self._bound_port: int | None = None
-        self._granian_server: GranianEmbeddedServer | None = None
         self.app = FastAPI(title=f"{self._server_name} MCP HTTP Server")
         self._mount_routes()
 
@@ -56,27 +51,41 @@ class _HttpTransportRuntime:
         async def _healthz() -> dict[str, str]:
             return {"status": "ok"}
 
-        async def _handle_sse(request: Request) -> Response:
-            mcp_server = self._require_mcp_server()
-            async with self._transport.connect_sse(
-                request.scope,
-                request.receive,
-                request._send,  # noqa: SLF001
-            ) as (
-                read_stream,
-                write_stream,
-            ):
-                await mcp_server.run(
-                    read_stream,
-                    write_stream,
-                    mcp_server.create_initialization_options(
-                        notification_options=NotificationOptions(),
-                    ),
-                )
-            return Response()
+        class _SSEEndpoint:
+            def __init__(self, runtime: _HttpTransportRuntime) -> None:
+                self._runtime = runtime
 
-        self.app.add_api_route("/sse", _handle_sse, methods=["GET"])
-        self.app.add_api_route("/sse/", _handle_sse, methods=["GET"])
+            async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+                mcp_server = self._runtime._require_mcp_server()
+                try:
+                    async with self._runtime._transport.connect_sse(
+                        scope,
+                        receive,
+                        send,
+                    ) as (
+                        read_stream,
+                        write_stream,
+                    ):
+                        await mcp_server.run(
+                            read_stream,
+                            write_stream,
+                            mcp_server.create_initialization_options(
+                                notification_options=NotificationOptions(),
+                            ),
+                        )
+                except (ClosedResourceError, BrokenResourceError):
+                    logger.debug("SSE client disconnected")
+                except RuntimeError as exc:
+                    # Granian can surface a late ASGI flow race when a client disconnects
+                    # exactly as a response is being finalized.
+                    if "Response already started" in str(exc):
+                        logger.debug("Ignoring SSE response-finalization race: %s", exc)
+                        return
+                    raise
+
+        sse_endpoint = _SSEEndpoint(self)
+        self.app.router.add_route("/sse", sse_endpoint, methods=["GET"])
+        self.app.router.add_route("/sse/", sse_endpoint, methods=["GET"])
 
         async def _handle_message_post(request: Request) -> Response:
             session_id_param = request.query_params.get("session_id")
@@ -120,32 +129,6 @@ class _HttpTransportRuntime:
         self.app.add_api_route("/sse/messages", _handle_message_post, methods=["POST"])
         self.app.add_api_route("/sse/messages/", _handle_message_post, methods=["POST"])
 
-    async def serve(self, *, host: str, port: int) -> None:
-        if self._mcp_server is None:
-            raise RuntimeError("HTTP runtime cannot start before MCP server bind")
-
-        if self._granian_server is None:
-            self._bound_host = host
-            self._bound_port = port
-
-            proxy_headers = True
-            forwarded_allow_ips = ""
-            asgi_app = wrap_asgi_with_proxy_headers(self.app, "*")
-            self._granian_server = GranianEmbeddedServer(
-                target=asgi_app,
-                address=host,
-                port=port,
-                interface=Interfaces.ASGI,
-                log_level=LogLevels.info,
-            )
-        elif self._bound_host != host or self._bound_port != port:
-            raise RuntimeError(
-                "HTTP singleton already initialized with a different host/port"
-            )
-
-        await self._granian_server.serve()
-
-
 _HTTP_RUNTIME_SINGLETON: _HttpTransportRuntime | None = None
 
 
@@ -182,16 +165,74 @@ async def serve_http(
     host: str | None = None,
     port: int | None = None,
 ) -> None:
-    """Serve MCP over HTTP using SSE transport."""
-    resolved_host = host or _resolve_http_host()
-    resolved_port = port if port is not None else _resolve_http_port()
+    """Backward-compatible helper for in-process HTTP wiring."""
     runtime = _get_http_runtime()
     runtime.bind(mcp_server, server_name=server_name)
 
+
+def create_http_app() -> FastAPI:
+    """Build the ASGI app for Granian's non-embedded factory mode."""
+    from everspring_mcp.mcp.server import create_server
+    from everspring_mcp.vector.config import VectorConfig
+
+    runtime = _get_http_runtime()
+    mcp_server = create_server(config=VectorConfig.from_env())
+    runtime.bind(mcp_server.mcp, server_name=mcp_server.name)
+    runtime.app.state.mcp_server = mcp_server
+
+    if not getattr(runtime.app.state, "_mcp_startup_hook_registered", False):
+
+        @runtime.app.on_event("startup")
+        async def _initialize_mcp_server() -> None:
+            await runtime.app.state.mcp_server.initialize()
+
+        runtime.app.state._mcp_startup_hook_registered = True
+
+    return runtime.app
+
+
+async def serve_http_via_granian(
+    *,
+    host: str | None = None,
+    port: int | None = None,
+    workers: int | None = None,
+    backlog: int | None = None,
+    threads: int | None = None,
+    log_level: str = "info",
+    env: dict[str, str] | None = None,
+) -> int:
+    """Launch HTTP transport with Granian standard server (non-embedded)."""
+    resolved_host = host or _resolve_http_host()
+    resolved_port = port if port is not None else _resolve_http_port()
+    command = [
+        sys.executable,
+        "-m",
+        "granian",
+        "--interface",
+        "asgi",
+        "--factory",
+        "--host",
+        resolved_host,
+        "--port",
+        str(resolved_port),
+        "--log-level",
+        log_level.lower(),
+    ]
+    if workers is not None:
+        command.extend(["--workers", str(workers)])
+    if backlog is not None:
+        command.extend(["--backlog", str(backlog)])
+    if threads is not None:
+        command.extend(["--runtime-threads", str(threads)])
+    command.append("everspring_mcp.http.serve_http:create_http_app")
+
     logger.info(
-        "Starting HTTP MCP transport for %s at http://%s:%s (SSE: /sse, POST: /messages; alias: /sse/messages)",
-        server_name,
+        "Starting HTTP MCP transport via Granian at http://%s:%s (SSE: /sse, POST: /messages; alias: /sse/messages)",
         resolved_host,
         resolved_port,
     )
-    await runtime.serve(host=resolved_host, port=resolved_port)
+    process = await asyncio.create_subprocess_exec(
+        *command,
+        env=env,
+    )
+    return await process.wait()

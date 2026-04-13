@@ -8,21 +8,26 @@ This package provides tools for scraping Spring documentation:
 - Custom exceptions for error handling
 """
 
-from everspring_mcp.scraper.browser import BrowserConfig, NotModifiedSignal, SpringBrowser, USER_AGENTS
+from everspring_mcp.scraper.browser import (
+    USER_AGENTS,
+    BrowserConfig,
+    NotModifiedSignal,
+    SpringBrowser,
+)
 from everspring_mcp.scraper.discovery import (
     BASE_SKIP_PATTERNS,
+    REFERENCE_ONLY_SKIP_PATTERNS,
+    SKIP_EXTENSIONS,
     DiscoveredLink,
     DiscoveryConfig,
     DiscoveryResult,
     DiscoveryStatus,
-    REFERENCE_ONLY_SKIP_PATTERNS,
     SpringDocDiscovery,
     extract_base_path,
     flatten_nav_items,
     is_internal_link,
     normalize_url,
     should_skip_url,
-    SKIP_EXTENSIONS,
 )
 from everspring_mcp.scraper.exceptions import (
     BrowserLaunchError,
@@ -39,16 +44,16 @@ from everspring_mcp.scraper.parser import (
     SpringDocParser,
     SpringMarkdownConverter,
 )
-from everspring_mcp.scraper.registry import SubmoduleRegistry, SubmoduleTarget
 from everspring_mcp.scraper.pipeline import (
     PipelineConfig,
     PipelineStatus,
     S3Client,
     ScrapeResult,
-    ScrapeTarget,
     ScraperPipeline,
+    ScrapeTarget,
     lambda_handler,
 )
+from everspring_mcp.scraper.registry import SubmoduleRegistry, SubmoduleTarget
 
 __all__ = [
     # Browser

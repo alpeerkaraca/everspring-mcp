@@ -11,7 +11,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 
-class SearchStatus(str, Enum):
+class SearchStatus(Enum):
     """Status of a search operation."""
 
     SUCCESS = "success"

@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-from functools import partial
 import time
 from collections import defaultdict
+from functools import partial
 from typing import Any
 
 from everspring_mcp.models.metadata import SearchResult
@@ -231,7 +231,7 @@ class HybridRetriever:
         where: dict[str, Any] | None,
     ) -> list[dict[str, Any]]:
         """Run dense retrieval via ChromaDB."""
-        
+
         query_vectors = await self._embedder.embed_texts([query])
 
         query_func = partial(

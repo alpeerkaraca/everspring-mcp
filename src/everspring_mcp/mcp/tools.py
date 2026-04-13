@@ -13,11 +13,6 @@ from collections.abc import Callable
 from typing import Any
 from xml.sax.saxutils import escape, quoteattr
 
-from everspring_mcp.models.metadata import SearchResult
-from everspring_mcp.utils.logging import get_logger
-from everspring_mcp.vector.chroma_client import ChromaClient
-from everspring_mcp.vector.config import VectorConfig
-from everspring_mcp.vector.retriever import HybridRetriever
 from everspring_mcp.mcp.models import (
     ModuleInfo,
     ProgressNotification,
@@ -27,6 +22,11 @@ from everspring_mcp.mcp.models import (
     SearchStatus,
     StatusResponse,
 )
+from everspring_mcp.models.metadata import SearchResult
+from everspring_mcp.utils.logging import get_logger
+from everspring_mcp.vector.chroma_client import ChromaClient
+from everspring_mcp.vector.config import VectorConfig
+from everspring_mcp.vector.retriever import HybridRetriever
 
 logger = get_logger("mcp.tools")
 
@@ -374,7 +374,7 @@ class SpringDocsTool:
             collection = self._chroma.get_collection()
             total_docs = collection.count()
             module_data = defaultdict(lambda: {"versions": set(), "submodules": set(), "count": 0})
-            
+
             batch_size = 1000
             offset = 0
             while offset < total_docs:
@@ -388,7 +388,7 @@ class SpringDocsTool:
                         module_data[mod]["submodules"].add(meta.get("submodule"))
                     module_data[mod]["count"] += 1
                 offset += batch_size
-                
+
             modules = [
                 ModuleInfo(
                     name=name,
@@ -403,7 +403,7 @@ class SpringDocsTool:
         try:
             total_docs, modules = await asyncio.to_thread(_compute_status)
             bm25_loaded = self._retriever.ensure_bm25_index() if self._retriever else False
-            
+
             self._cached_status = StatusResponse(
                 healthy=True,
                 index_ready=total_docs > 0,
@@ -412,7 +412,7 @@ class SpringDocsTool:
                 bm25_index_loaded=bm25_loaded,
             )
             return self._cached_status
-            
+
         except Exception as e:
             logger.error(f"Status check failed: {e}")
             return StatusResponse(healthy=False, index_ready=False, total_documents=0, bm25_index_loaded=False)
