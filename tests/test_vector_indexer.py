@@ -11,7 +11,11 @@ import pytest
 from everspring_mcp.vector.chunking import MarkdownChunker
 from everspring_mcp.vector.config import VectorConfig
 from everspring_mcp.vector.embeddings import DEFAULT_MAIN_MODEL, Embedder
-from everspring_mcp.vector.indexer import HNSW_FINALIZATION_MESSAGE, VectorIndexer
+from everspring_mcp.vector.indexer import (
+    HNSW_FINALIZATION_MESSAGE,
+    VectorIndexer,
+    _resolve_markdown_path,
+)
 
 
 @pytest.fixture
@@ -62,6 +66,13 @@ Copied!
     chunks = chunker.chunk(markdown)
     assert chunks
     assert all("Copied!" not in c.content for c in chunks)
+
+
+def test_resolve_markdown_path_rejects_escaped_paths(tmp_path: Path) -> None:
+    docs_dir = tmp_path / "docs"
+    docs_dir.mkdir(parents=True, exist_ok=True)
+    assert _resolve_markdown_path(docs_dir, Path("../escape.md")) is None
+    assert _resolve_markdown_path(docs_dir, Path("/escape.md")) is None
 
 
 @pytest.mark.asyncio

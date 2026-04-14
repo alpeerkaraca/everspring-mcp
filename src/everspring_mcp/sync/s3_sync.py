@@ -56,6 +56,8 @@ SNAPSHOT_NAME_PATTERN = re.compile(
     r"^(?P<kind>chroma_db|sqlite_metadata)_(?P<token>\d{4}_\d{2}_\d{2}(?:_\d{2}_\d{2}_\d{2})?)\.zip$"
 )
 BM25_INDEX_FILENAME = "bm25_index.pkl"
+MAX_ARCHIVE_MEMBERS = 200_000
+MAX_ARCHIVE_UNCOMPRESSED_BYTES = 10 * 1024 * 1024 * 1024  # 10 GiB
 
 
 class _TransferProgressCallback:
@@ -288,20 +290,51 @@ class S3SyncService:
         if path.exists():
             path.unlink()
 
+    @staticmethod
+    def _is_zip_symlink(member: zipfile.ZipInfo) -> bool:
+        unix_mode = (member.external_attr >> 16) & 0o170000
+        return unix_mode == 0o120000
+
+    def _validate_archive_member_paths(
+        self,
+        members: list[zipfile.ZipInfo],
+        destination_dir: Path,
+    ) -> None:
+        destination_root = destination_dir.resolve()
+        if len(members) > MAX_ARCHIVE_MEMBERS:
+            raise ValueError(
+                f"Archive has too many entries ({len(members)} > {MAX_ARCHIVE_MEMBERS})"
+            )
+
+        total_uncompressed = 0
+        for member in members:
+            member_name = member.filename
+            member_path = PurePosixPath(member_name)
+            if member_path.is_absolute():
+                raise ValueError(f"Unsafe archive path: {member_name}")
+            if any(part == ".." for part in member_path.parts):
+                raise ValueError(f"Unsafe archive path traversal: {member_name}")
+            if self._is_zip_symlink(member):
+                raise ValueError(f"Archive contains symlink entry: {member_name}")
+
+            target_path = (destination_dir / member_name).resolve()
+            if not target_path.is_relative_to(destination_root):
+                raise ValueError(f"Unsafe archive path traversal: {member_name}")
+
+            if not member.is_dir():
+                total_uncompressed += max(member.file_size, 0)
+                if total_uncompressed > MAX_ARCHIVE_UNCOMPRESSED_BYTES:
+                    raise ValueError(
+                        "Archive exceeds uncompressed size limit "
+                        f"({MAX_ARCHIVE_UNCOMPRESSED_BYTES} bytes)",
+                    )
+
     def _extract_zip_safely(self, archive_path: Path, destination_dir: Path) -> None:
         """Extract zip archive with path traversal protection."""
         destination_dir.mkdir(parents=True, exist_ok=True)
-        destination_root = destination_dir.resolve()
         with zipfile.ZipFile(archive_path, mode="r") as bundle:
-            for member in bundle.infolist():
-                member_path = Path(member.filename)
-                if member_path.is_absolute():
-                    raise ValueError(f"Unsafe archive path: {member.filename}")
-                target_path = (destination_dir / member.filename).resolve()
-                if not target_path.is_relative_to(destination_root):
-                    raise ValueError(
-                        f"Unsafe archive path traversal: {member.filename}"
-                    )
+            members = bundle.infolist()
+            self._validate_archive_member_paths(members, destination_dir)
             bundle.extractall(path=destination_dir)
 
     def _extract_sqlite_snapshot(
@@ -1153,26 +1186,15 @@ class S3SyncService:
     def _safe_extract_archive(self, archive_path: Path, destination_dir: Path) -> None:
         """Extract archive with path traversal protection."""
         destination_dir.mkdir(parents=True, exist_ok=True)
-        destination_root = destination_dir.resolve()
-
-        db_target = self.config.db_path
-        chroma_target = self.config.chroma_dir
 
         with zipfile.ZipFile(archive_path, mode="r") as bundle:
             members = bundle.infolist()
+            self._validate_archive_member_paths(members, destination_dir)
             has_db = False
             has_chroma = False
 
             for member in members:
                 member_name = member.filename
-                member_path = Path(member_name)
-                if member_path.is_absolute():
-                    raise ValueError(f"Unsafe archive path: {member_name}")
-
-                target_path = (destination_dir / member_name).resolve()
-                if not target_path.is_relative_to(destination_root):
-                    raise ValueError(f"Unsafe archive path traversal: {member_name}")
-
                 normalized_name = member_name.rstrip("/")
                 if normalized_name == self.config.db_filename:
                     has_db = True
@@ -1183,11 +1205,6 @@ class S3SyncService:
                 raise ValueError("Knowledge pack archive missing SQLite database")
             if not has_chroma:
                 raise ValueError("Knowledge pack archive missing ChromaDB data")
-
-            if db_target.exists():
-                db_target.unlink()
-            if chroma_target.exists():
-                shutil.rmtree(chroma_target)
 
             bundle.extractall(path=destination_dir)
 
@@ -1302,23 +1319,32 @@ class S3SyncService:
             submodule=submodule,
         )
         local_archive.parent.mkdir(parents=True, exist_ok=True)
+        staging_root: Path | None = None
 
         try:
-
-            def _download_blob() -> tuple[bytes, dict[str, str]]:
+            def _download_blob() -> tuple[str, int, dict[str, str]]:
                 response = self._s3.get_object(
                     Bucket=self.config.s3_bucket,
                     Key=s3_key,
                 )
-                content = response["Body"].read()
+                body = response["Body"]
                 metadata = response.get("Metadata", {})
-                return content, metadata
+                digest = hashlib.sha256()
+                size_bytes = 0
+                try:
+                    with local_archive.open("wb") as archive_handle:
+                        while True:
+                            chunk = body.read(1024 * 1024)
+                            if not chunk:
+                                break
+                            archive_handle.write(chunk)
+                            digest.update(chunk)
+                            size_bytes += len(chunk)
+                finally:
+                    body.close()
+                return digest.hexdigest(), size_bytes, metadata
 
-            content, metadata = await asyncio.to_thread(_download_blob)
-            await asyncio.to_thread(local_archive.write_bytes, content)
-
-            archive_hash = compute_hash(content)
-            archive_size = len(content)
+            archive_hash, archive_size, metadata = await asyncio.to_thread(_download_blob)
             expected_hash = metadata.get("content-hash")
 
             if expected_hash and expected_hash != archive_hash:
@@ -1326,10 +1352,36 @@ class S3SyncService:
                     f"Knowledge pack hash mismatch: expected {expected_hash}, got {archive_hash}",
                 )
 
+            staging_root = Path(
+                tempfile.mkdtemp(
+                    prefix="knowledge-pack-download-",
+                    dir=str(self.config.local_data_dir),
+                )
+            )
+            staging_extract_dir = staging_root / "extract"
             await asyncio.to_thread(
                 self._safe_extract_archive,
                 local_archive,
-                self.config.local_data_dir,
+                staging_extract_dir,
+            )
+            sqlite_staged_path = staging_extract_dir / self.config.db_filename
+            chroma_staged_dir = staging_extract_dir / self.config.chroma_subdir
+            bm25_staged_path = staging_extract_dir / BM25_INDEX_FILENAME
+            if not sqlite_staged_path.exists():
+                raise ValueError(
+                    "Knowledge pack archive extraction did not produce SQLite database",
+                )
+            if not chroma_staged_dir.exists() or not any(
+                p.is_file() for p in chroma_staged_dir.rglob("*")
+            ):
+                raise ValueError(
+                    "Knowledge pack archive extraction did not produce ChromaDB data",
+                )
+            await asyncio.to_thread(
+                self._apply_snapshot_staging,
+                sqlite_staged_path,
+                chroma_staged_dir,
+                bm25_staged_path if bm25_staged_path.exists() else None,
             )
 
             if cleanup_archive and local_archive.exists():
@@ -1384,6 +1436,9 @@ class S3SyncService:
                 success=False,
                 error=str(e),
             )
+        finally:
+            if staging_root and staging_root.exists():
+                await asyncio.to_thread(shutil.rmtree, staging_root, True)
 
     @retry(
         retry=retry_if_exception_type((ClientError, BotoCoreError)),
