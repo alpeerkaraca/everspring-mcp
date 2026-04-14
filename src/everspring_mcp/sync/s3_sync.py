@@ -58,6 +58,7 @@ SNAPSHOT_NAME_PATTERN = re.compile(
 BM25_INDEX_FILENAME = "bm25_index.pkl"
 MAX_ARCHIVE_MEMBERS = 200_000
 MAX_ARCHIVE_UNCOMPRESSED_BYTES = 10 * 1024 * 1024 * 1024  # 10 GiB
+DOWNLOAD_STREAM_CHUNK_BYTES = 1024 * 1024
 
 
 class _TransferProgressCallback:
@@ -323,11 +324,12 @@ class S3SyncService:
 
             if not member.is_dir():
                 total_uncompressed += max(member.file_size, 0)
-                if total_uncompressed > MAX_ARCHIVE_UNCOMPRESSED_BYTES:
-                    raise ValueError(
-                        "Archive exceeds uncompressed size limit "
-                        f"({MAX_ARCHIVE_UNCOMPRESSED_BYTES} bytes)",
-                    )
+
+        if total_uncompressed > MAX_ARCHIVE_UNCOMPRESSED_BYTES:
+            raise ValueError(
+                "Archive exceeds uncompressed size limit "
+                f"({MAX_ARCHIVE_UNCOMPRESSED_BYTES} bytes)",
+            )
 
     def _extract_zip_safely(self, archive_path: Path, destination_dir: Path) -> None:
         """Extract zip archive with path traversal protection."""
@@ -1322,7 +1324,7 @@ class S3SyncService:
         staging_root: Path | None = None
 
         try:
-            def _download_blob() -> tuple[str, int, dict[str, str]]:
+            def _download_archive_streaming() -> tuple[str, int, dict[str, str]]:
                 response = self._s3.get_object(
                     Bucket=self.config.s3_bucket,
                     Key=s3_key,
@@ -1334,7 +1336,7 @@ class S3SyncService:
                 try:
                     with local_archive.open("wb") as archive_handle:
                         while True:
-                            chunk = body.read(1024 * 1024)
+                            chunk = body.read(DOWNLOAD_STREAM_CHUNK_BYTES)
                             if not chunk:
                                 break
                             archive_handle.write(chunk)
@@ -1344,7 +1346,9 @@ class S3SyncService:
                     body.close()
                 return digest.hexdigest(), size_bytes, metadata
 
-            archive_hash, archive_size, metadata = await asyncio.to_thread(_download_blob)
+            archive_hash, archive_size, metadata = await asyncio.to_thread(
+                _download_archive_streaming
+            )
             expected_hash = metadata.get("content-hash")
 
             if expected_hash and expected_hash != archive_hash:
@@ -1354,7 +1358,7 @@ class S3SyncService:
 
             staging_root = Path(
                 tempfile.mkdtemp(
-                    prefix="knowledge-pack-download-",
+                    prefix="knowledge-pack-staging-",
                     dir=str(self.config.local_data_dir),
                 )
             )
@@ -1371,9 +1375,11 @@ class S3SyncService:
                 raise ValueError(
                     "Knowledge pack archive extraction did not produce SQLite database",
                 )
-            if not chroma_staged_dir.exists() or not any(
-                p.is_file() for p in chroma_staged_dir.rglob("*")
-            ):
+            has_chroma_files = (
+                next((p for p in chroma_staged_dir.rglob("*") if p.is_file()), None)
+                is not None
+            )
+            if not chroma_staged_dir.exists() or not has_chroma_files:
                 raise ValueError(
                     "Knowledge pack archive extraction did not produce ChromaDB data",
                 )
