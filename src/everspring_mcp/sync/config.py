@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import re
 from datetime import date, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -192,14 +192,24 @@ class SyncConfig(BaseModel):
         Returns:
             Local file path
         """
+        normalized_key = s3_key.replace("\\", "/")
         raw_prefix = f"{self.s3_prefix}/{self.raw_data_subprefix}/"
-        relative_key = s3_key
-        if s3_key.startswith(raw_prefix):
-            relative_key = s3_key[len(raw_prefix):]
-        elif s3_key.startswith(f"{self.s3_prefix}/"):
-            relative_key = s3_key[len(self.s3_prefix) + 1:]
+        relative_key = normalized_key
+        if normalized_key.startswith(raw_prefix):
+            relative_key = normalized_key[len(raw_prefix):]
+        elif normalized_key.startswith(f"{self.s3_prefix}/"):
+            relative_key = normalized_key[len(self.s3_prefix) + 1:]
 
-        return self.docs_dir / relative_key
+        candidate = PurePosixPath(relative_key)
+        if candidate.is_absolute() or any(part == ".." for part in candidate.parts):
+            raise ValueError(f"Unsafe S3 key path: {s3_key}")
+
+        safe_relative = Path(*[part for part in candidate.parts if part not in ("", ".")])
+        docs_root = self.docs_dir.resolve()
+        local_path = (docs_root / safe_relative).resolve()
+        if not local_path.is_relative_to(docs_root):
+            raise ValueError(f"Unsafe S3 key path traversal: {s3_key}")
+        return local_path
 
     @staticmethod
     def _module_segment(module: str, submodule: str | None = None) -> str:

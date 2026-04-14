@@ -96,6 +96,18 @@ def _metadata_path_for(markdown_path: Path) -> Path:
     return markdown_path.parent / "metadata" / f"{url_hash}.json"
 
 
+def _resolve_markdown_path(docs_dir: Path, relative_path: Path) -> Path | None:
+    if relative_path.is_absolute():
+        return None
+    if any(part == ".." for part in relative_path.parts):
+        return None
+    docs_root = docs_dir.resolve()
+    markdown_path = (docs_root / relative_path).resolve()
+    if not markdown_path.is_relative_to(docs_root):
+        return None
+    return markdown_path
+
+
 def _load_metadata(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
@@ -129,8 +141,8 @@ def _prepare_document_worker(
     if _is_metadata_path(relative_path):
         return None
 
-    markdown_path = Path(docs_dir) / relative_path
-    if not markdown_path.exists():
+    markdown_path = _resolve_markdown_path(Path(docs_dir), relative_path)
+    if markdown_path is None or not markdown_path.exists():
         return None
 
     metadata_path = _metadata_path_for(markdown_path)
@@ -423,8 +435,8 @@ class VectorIndexer:
         if self._is_metadata_path(relative_path):
             return None
 
-        markdown_path = self.config.docs_dir / relative_path
-        if not markdown_path.exists():
+        markdown_path = _resolve_markdown_path(self.config.docs_dir, relative_path)
+        if markdown_path is None or not markdown_path.exists():
             return None
 
         metadata_path = self._metadata_path_for(relative_path)

@@ -351,6 +351,11 @@ def test_s3_service_uses_parallel_jobs_for_boto_connection_pool(
     assert service._semaphore._value == 17  # noqa: SLF001
 
 
+def test_get_local_path_rejects_path_traversal(sync_config: SyncConfig) -> None:
+    with pytest.raises(ValueError, match="Unsafe S3 key path"):
+        sync_config.get_local_path("test-docs/raw-data/spring-boot/4.0.5/../../secrets.txt")
+
+
 @pytest.mark.asyncio
 async def test_download_changes_isolates_per_file_failures(
     monkeypatch: pytest.MonkeyPatch,
@@ -408,6 +413,40 @@ async def test_download_changes_isolates_per_file_failures(
     failed = next(r for r in results if not r.success)
     assert failed.s3_key == fail_key
     assert failed.error is not None
+
+
+@pytest.mark.asyncio
+async def test_download_knowledge_pack_rolls_back_on_unsafe_archive(
+    mock_s3: Any,
+    sync_config: SyncConfig,
+) -> None:
+    """Unsafe archives must fail before activation and preserve live db/chroma data."""
+    original_db, original_chroma = _seed_local_datastores(sync_config)
+    service = S3SyncService(sync_config, s3_client=mock_s3)
+    key = sync_config.get_knowledge_pack_key(module="spring-boot", version="4.0.5")
+    payload = _zip_bytes(
+        {
+            sync_config.db_filename: b"sqlite-new-content",
+            "spring_docs/index.bin": b"vector-new-content",
+            "../escape.txt": b"malicious",
+        }
+    )
+    mock_s3.put_object(
+        Bucket=sync_config.s3_bucket,
+        Key=key,
+        Body=payload,
+        ContentType="application/zip",
+        Metadata={"content-hash": compute_hash(payload)},
+    )
+
+    result = await service.download_knowledge_pack(module="spring-boot", version="4.0.5")
+
+    assert not result.success
+    assert result.error is not None
+    assert sync_config.db_path.read_bytes() == original_db
+    assert (
+        sync_config.chroma_dir / "spring_docs" / "index.bin"
+    ).read_bytes() == original_chroma
 
 
 @pytest.mark.asyncio
