@@ -38,7 +38,7 @@ variable "private_subnet_cidrs" {
 variable "domain_name" {
   description = "Fully qualified domain for HTTPS endpoint (DNS managed externally, e.g. Cloudflare)."
   type        = string
-  default     = "everspring.alpeerkaraca.me"
+  default     = "everspring.example.com"
 }
 
 variable "container_image" {

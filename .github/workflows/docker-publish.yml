@@ -65,6 +65,12 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Trigger Jenkins Deployment
+        env:
+          JENKINS_WEBHOOK_URL: ${{ secrets.JENKINS_WEBHOOK_URL }}
+          JENKINS_WEBHOOK_TOKEN: ${{ secrets.JENKINS_WEBHOOK_TOKEN }}
         run: |
-          curl -X POST \
-          "https://ci.alpeerkaraca.me/generic-webhook-trigger/invoke?token=${{ secrets.JENKINS_WEBHOOK_TOKEN }}"
+          if [ -z "$JENKINS_WEBHOOK_URL" ] || [ -z "$JENKINS_WEBHOOK_TOKEN" ]; then
+            echo "Skipping Jenkins trigger: JENKINS_WEBHOOK_URL or JENKINS_WEBHOOK_TOKEN is not configured."
+            exit 0
+          fi
+          curl -X POST "${JENKINS_WEBHOOK_URL}?token=${JENKINS_WEBHOOK_TOKEN}"

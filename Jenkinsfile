@@ -9,9 +9,10 @@ pipeline {
     }
 
     environment {
-        IMAGE_NAME = "ghcr.io/alpeerkaraca/everspring-mcp"
-        CONTAINER_NAME = "everspring-mcp-app"
-        GHCR_CREDENTIALS_ID = "ghcr-token" 
+        IMAGE_NAME = "${env.IMAGE_NAME}"
+        CONTAINER_NAME = "${env.CONTAINER_NAME ?: 'everspring-mcp-app'}"
+        GHCR_CREDENTIALS_ID = "${env.GHCR_CREDENTIALS_ID}"
+        GHCR_USERNAME = "${env.GHCR_USERNAME}"
     }
 
     stages {
@@ -20,7 +21,10 @@ pipeline {
                 withCredentials([string(credentialsId: env.GHCR_CREDENTIALS_ID, variable: 'GHCR_PAT')]) {
                     sh """
                         export XDG_RUNTIME_DIR=/run/user/\$(id -u)
-                        echo \$GHCR_PAT | podman login ghcr.io -u alpeerkaraca --password-stdin
+                        : "\${IMAGE_NAME:?IMAGE_NAME is required}"
+                        : "\${GHCR_CREDENTIALS_ID:?GHCR_CREDENTIALS_ID is required}"
+                        : "\${GHCR_USERNAME:?GHCR_USERNAME is required}"
+                        echo \$GHCR_PAT | podman login ghcr.io -u \$GHCR_USERNAME --password-stdin
                     """
                 }
             }

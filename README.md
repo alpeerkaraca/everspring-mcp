@@ -1,5 +1,5 @@
 # EverSpring MCP
-[![Build Status](https://ci.alpeerkaraca.me/buildStatus/icon?job=everspring-mcp-deploy)](https://ci.alpeerkaraca.me/job/everspring-mcp-deploy/)
+[![Build](https://github.com/alpeerkaraca/everspring-mcp/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/alpeerkaraca/everspring-mcp/actions/workflows/docker-publish.yml)
 ![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)
 ![uv](https://img.shields.io/badge/uv-package%20manager-6E56CF)
 ![ChromaDB](https://img.shields.io/badge/ChromaDB-Vector%20Store-4F46E5)
