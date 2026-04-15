@@ -12,6 +12,8 @@ permissions:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
+  JENKINS_WEBHOOK_URL: ${{ secrets.JENKINS_WEBHOOK_URL }}
+  JENKINS_WEBHOOK_TOKEN: ${{ secrets.JENKINS_WEBHOOK_TOKEN }}
 
 jobs:
   build-and-push:
@@ -64,7 +66,7 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Trigger Jenkins Deployment
+      - name: Trigger Jenkins Deployment (Optional)
+        if: env.JENKINS_WEBHOOK_URL != '' && env.JENKINS_WEBHOOK_TOKEN != ''
         run: |
-          curl -X POST \
-          "https://ci.alpeerkaraca.me/generic-webhook-trigger/invoke?token=${{ secrets.JENKINS_WEBHOOK_TOKEN }}"
+          curl -X POST "${JENKINS_WEBHOOK_URL}?token=${JENKINS_WEBHOOK_TOKEN}"
