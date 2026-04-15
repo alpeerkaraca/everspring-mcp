@@ -9,10 +9,7 @@ pipeline {
     }
 
     environment {
-        IMAGE_NAME = "${env.IMAGE_NAME ?: ''}"
         CONTAINER_NAME = "${env.CONTAINER_NAME ?: 'everspring-mcp-app'}"
-        GHCR_CREDENTIALS_ID = "${env.GHCR_CREDENTIALS_ID ?: ''}"
-        GHCR_USERNAME = "${env.GHCR_USERNAME ?: ''}"
     }
 
     stages {
