@@ -66,7 +66,7 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Trigger Jenkins Deployment
+      - name: Trigger Jenkins Deployment (Optional)
         if: env.JENKINS_WEBHOOK_URL != '' && env.JENKINS_WEBHOOK_TOKEN != ''
         run: |
           curl -X POST "${JENKINS_WEBHOOK_URL}?token=${JENKINS_WEBHOOK_TOKEN}"

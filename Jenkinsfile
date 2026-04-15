@@ -9,6 +9,7 @@ pipeline {
     }
 
     environment {
+        // Container name defaults locally; registry/auth values must be explicitly provided by Jenkins job configuration.
         CONTAINER_NAME = "${env.CONTAINER_NAME ?: 'everspring-mcp-app'}"
     }
 
