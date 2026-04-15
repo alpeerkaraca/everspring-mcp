@@ -18,13 +18,13 @@ pipeline {
             steps {
                 script {
                     if (!env.IMAGE_NAME?.trim()) {
-                        error('Required Jenkins job variable IMAGE_NAME is not configured')
+                        error('Required Jenkins job variable IMAGE_NAME is not configured (set it in Jenkins job configuration/environment).')
                     }
                     if (!env.GHCR_CREDENTIALS_ID?.trim()) {
-                        error('Required Jenkins job variable GHCR_CREDENTIALS_ID is not configured')
+                        error('Required Jenkins job variable GHCR_CREDENTIALS_ID is not configured (set it in Jenkins job configuration/environment).')
                     }
                     if (!env.GHCR_USERNAME?.trim()) {
-                        error('Required Jenkins job variable GHCR_USERNAME is not configured')
+                        error('Required Jenkins job variable GHCR_USERNAME is not configured (set it in Jenkins job configuration/environment).')
                     }
                 }
                 withCredentials([string(credentialsId: env.GHCR_CREDENTIALS_ID, variable: 'GHCR_PAT')]) {
