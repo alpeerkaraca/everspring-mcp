@@ -20,13 +20,13 @@ pipeline {
             steps {
                 script {
                     if (!env.IMAGE_NAME?.trim()) {
-                        error('IMAGE_NAME is required')
+                        error('IMAGE_NAME environment variable is required but not set')
                     }
                     if (!env.GHCR_CREDENTIALS_ID?.trim()) {
-                        error('GHCR_CREDENTIALS_ID is required')
+                        error('GHCR_CREDENTIALS_ID environment variable is required but not set')
                     }
                     if (!env.GHCR_USERNAME?.trim()) {
-                        error('GHCR_USERNAME is required')
+                        error('GHCR_USERNAME environment variable is required but not set')
                     }
                 }
                 withCredentials([string(credentialsId: env.GHCR_CREDENTIALS_ID, variable: 'GHCR_PAT')]) {

@@ -12,6 +12,8 @@ permissions:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
+  JENKINS_WEBHOOK_URL: ${{ secrets.JENKINS_WEBHOOK_URL }}
+  JENKINS_WEBHOOK_TOKEN: ${{ secrets.JENKINS_WEBHOOK_TOKEN }}
 
 jobs:
   build-and-push:
@@ -65,9 +67,6 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Trigger Jenkins Deployment
-        if: ${{ secrets.JENKINS_WEBHOOK_URL != '' && secrets.JENKINS_WEBHOOK_TOKEN != '' }}
-        env:
-          JENKINS_WEBHOOK_URL: ${{ secrets.JENKINS_WEBHOOK_URL }}
-          JENKINS_WEBHOOK_TOKEN: ${{ secrets.JENKINS_WEBHOOK_TOKEN }}
+        if: env.JENKINS_WEBHOOK_URL != '' && env.JENKINS_WEBHOOK_TOKEN != ''
         run: |
           curl -X POST "${JENKINS_WEBHOOK_URL}?token=${JENKINS_WEBHOOK_TOKEN}"
