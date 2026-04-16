@@ -60,7 +60,7 @@ pipeline {
                         --memory="4g" \
                         --memory-swap="6g" \
                         --cpus="2.0" \
-                        -p 8000:8000 \
+                        -p 127.0.0.1:8000:8000 \
                         -v everspring-data-${params.TIER}:/home/everspring/.everspring \
                         ${IMAGE_NAME}:latest \
                         python -m everspring_mcp.main serve \
