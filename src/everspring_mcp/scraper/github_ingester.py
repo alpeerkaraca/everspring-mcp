@@ -9,6 +9,7 @@ This module provides GitHubIngester for fetching and processing:
 from __future__ import annotations
 
 import re
+import shlex
 import subprocess
 import tempfile
 from pathlib import Path
@@ -151,10 +152,11 @@ class GitHubIngester:
         logger.info(f"Converting {adoc_path} to {output_md}")
         
         try:
-            # Use -o flag to write to file instead of stdout
+            # Build argv list to avoid shell injection; shlex.split handles
+            # configured command options (e.g. "npx downdoc") safely.
+            cmd = shlex.split(self.config.downdoc_command) + [str(adoc_path), "-o", str(output_md)]
             subprocess.run(
-                f"{self.config.downdoc_command} {adoc_path} -o {output_md}",
-                shell=True,
+                cmd,
                 check=True,
                 capture_output=True,
                 text=True,
