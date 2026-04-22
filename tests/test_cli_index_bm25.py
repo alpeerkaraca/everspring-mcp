@@ -9,6 +9,11 @@ from pathlib import Path
 import pytest
 
 from everspring_mcp import main as cli_main
+from everspring_mcp.cli import index as index_cli
+from everspring_mcp.cli import sync as sync_cli
+from everspring_mcp.cli import mcp as mcp_cli
+from everspring_mcp.cli import model_cache as cache_cli
+from everspring_mcp.cli import utils as cli_utils
 from everspring_mcp.vector.config import VectorConfig
 from everspring_mcp.vector.embeddings import (
     DEFAULT_MAIN_MODEL,
@@ -22,7 +27,7 @@ def disable_auto_snapshot_refresh(monkeypatch: pytest.MonkeyPatch) -> None:
     async def _noop_refresh(*, model_name: str, tier: str, data_dir: Path) -> None:
         del model_name, tier, data_dir
 
-    monkeypatch.setattr(cli_main, "_auto_refresh_runtime_snapshots", _noop_refresh)
+    monkeypatch.setattr(index_cli, "_auto_refresh_runtime_snapshots", _noop_refresh)
 
 
 def test_index_parser_accepts_build_bm25_flag() -> None:
@@ -101,7 +106,7 @@ async def test_run_serve_rejects_http_only_flags_for_stdio() -> None:
     )
 
     with pytest.raises(SystemExit, match="can only be used with --transport http"):
-        await cli_main._run_serve(args)
+        await mcp_cli._run_serve(args)
 
 
 @pytest.mark.asyncio
@@ -137,8 +142,8 @@ async def test_run_index_builds_bm25_when_flag_enabled(
     def fake_from_env(cls: type[VectorConfig]) -> VectorConfig:
         return cls(data_dir=tmp_path, chroma_dir=tmp_path / "chroma")
 
-    monkeypatch.setattr(cli_main, "VectorIndexer", FakeIndexer)
-    monkeypatch.setattr(cli_main, "HybridRetriever", FakeRetriever)
+    monkeypatch.setattr(index_cli, "VectorIndexer", FakeIndexer)
+    monkeypatch.setattr(index_cli, "HybridRetriever", FakeRetriever)
     monkeypatch.setattr(VectorConfig, "from_env", classmethod(fake_from_env))
 
     args = argparse.Namespace(
@@ -163,7 +168,7 @@ async def test_run_index_builds_bm25_when_flag_enabled(
         json=True,
     )
 
-    exit_code = await cli_main._run_index(args)
+    exit_code = await index_cli._run_index(args)
     capsys.readouterr()
 
     assert exit_code == 0
@@ -199,8 +204,8 @@ async def test_run_index_skips_bm25_for_main_tier(
         def build_bm25_index(self) -> None:
             captured["bm25_built"] = True
 
-    monkeypatch.setattr(cli_main, "VectorIndexer", FakeIndexer)
-    monkeypatch.setattr(cli_main, "HybridRetriever", FakeRetriever)
+    monkeypatch.setattr(index_cli, "VectorIndexer", FakeIndexer)
+    monkeypatch.setattr(index_cli, "HybridRetriever", FakeRetriever)
     monkeypatch.setattr(
         VectorConfig,
         "from_env",
@@ -228,7 +233,7 @@ async def test_run_index_skips_bm25_for_main_tier(
         tier="main",
         json=True,
     )
-    exit_code = await cli_main._run_index(args)
+    exit_code = await index_cli._run_index(args)
     assert exit_code == 0
     assert "bm25_built" not in captured
 
@@ -258,7 +263,7 @@ async def test_run_index_applies_bge_model_for_selected_tier(
             del limit
             return types.SimpleNamespace(documents_indexed=0, chunks_indexed=0)
 
-    monkeypatch.setattr(cli_main, "VectorIndexer", FakeIndexer)
+    monkeypatch.setattr(index_cli, "VectorIndexer", FakeIndexer)
     monkeypatch.setattr(
         VectorConfig,
         "from_env",
@@ -291,14 +296,14 @@ async def test_run_index_applies_bge_model_for_selected_tier(
             tier=selected_tier,
             json=True,
         )
-        exit_code = await cli_main._run_index(args)
+        exit_code = await index_cli._run_index(args)
         assert exit_code == 0
         assert captured["tier"] == selected_tier
         assert captured["model"] == model_name
         assert captured["max_tokens"] == expected_max_tokens
         assert captured["overlap_tokens"] == expected_overlap_tokens
-        assert captured["chroma_dir"].endswith(
-            f"/.everspring/chroma-{selected_tier}-{cli_main._model_slug(model_name)}"
+        assert captured["chroma_dir"].replace("\\", "/").endswith(
+            f"/.everspring/chroma-{selected_tier}-{cli_utils._model_slug(model_name)}"
         )
 
 
@@ -331,8 +336,8 @@ async def test_run_index_coerces_path_overrides_to_path_objects(
         def build_bm25_index(self) -> None:
             return
 
-    monkeypatch.setattr(cli_main, "VectorIndexer", FakeIndexer)
-    monkeypatch.setattr(cli_main, "HybridRetriever", FakeRetriever)
+    monkeypatch.setattr(index_cli, "VectorIndexer", FakeIndexer)
+    monkeypatch.setattr(index_cli, "HybridRetriever", FakeRetriever)
     monkeypatch.setattr(
         VectorConfig,
         "from_env",
@@ -361,7 +366,7 @@ async def test_run_index_coerces_path_overrides_to_path_objects(
         json=True,
     )
 
-    exit_code = await cli_main._run_index(args)
+    exit_code = await index_cli._run_index(args)
     assert exit_code == 0
     assert issubclass(captured["data_dir_type"], Path)
     assert issubclass(captured["chroma_dir_type"], Path)
@@ -398,7 +403,7 @@ async def test_run_search_uses_tier_model_chroma_dir_by_default(
             del query, top_k, module, version_major, deduplicate_urls
             return []
 
-    monkeypatch.setattr(cli_main, "HybridRetriever", FakeRetriever)
+    monkeypatch.setattr(index_cli, "HybridRetriever", FakeRetriever)
     monkeypatch.setattr(
         VectorConfig,
         "from_env",
@@ -416,8 +421,8 @@ async def test_run_search_uses_tier_model_chroma_dir_by_default(
         json=False,
     )
 
-    exit_code = await cli_main._run_search(args)
+    exit_code = await index_cli._run_search(args)
     assert exit_code == 0
     assert captured["tier"] == "slim"
     assert captured["model"] == DEFAULT_SLIM_MODEL
-    assert captured["chroma_dir"].endswith("/.everspring/chroma-slim-bge-base-en-v1-5")
+    assert captured["chroma_dir"].replace("\\", "/").endswith("/.everspring/chroma-slim-bge-base-en-v1-5")

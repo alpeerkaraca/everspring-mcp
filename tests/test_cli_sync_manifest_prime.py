@@ -9,6 +9,11 @@ from pathlib import Path
 import pytest
 
 from everspring_mcp import main as cli_main
+from everspring_mcp.cli import index as index_cli
+from everspring_mcp.cli import sync as sync_cli
+from everspring_mcp.cli import mcp as mcp_cli
+from everspring_mcp.cli import model_cache as cache_cli
+from everspring_mcp.cli import utils as cli_utils
 from everspring_mcp.sync.config import SyncConfig
 from everspring_mcp.sync.s3_sync import ManifestBuildResult, SnapshotDownloadResult
 
@@ -75,8 +80,8 @@ async def test_run_manifest_prime_honors_parallel_jobs_limit(
         ("spring-data", "5.0.4", "jpa"),
     ]
 
-    monkeypatch.setattr(cli_main, "S3SyncService", FakeService)
-    monkeypatch.setattr(cli_main, "_load_sync_targets_from_matrix", lambda _path: targets)
+    monkeypatch.setattr(sync_cli, "S3SyncService", FakeService)
+    monkeypatch.setattr(sync_cli, "_load_sync_targets_from_matrix", lambda _path: targets)
 
     args = argparse.Namespace(
         all=True,
@@ -94,7 +99,7 @@ async def test_run_manifest_prime_honors_parallel_jobs_limit(
         local_data_dir=tmp_path,
     )
 
-    exit_code = await cli_main._run_manifest_prime(args, config)
+    exit_code = await sync_cli._run_manifest_prime(args, config)
     capsys.readouterr()
 
     assert exit_code == 0
@@ -122,7 +127,7 @@ async def test_run_sync_manifest_passes_parallel_jobs_to_sync_config(
             local_data_dir=tmp_path,
         )
 
-    monkeypatch.setattr(cli_main, "_run_manifest_sync", fake_run_manifest_sync)
+    monkeypatch.setattr(sync_cli, "_run_manifest_sync", fake_run_manifest_sync)
     monkeypatch.setattr(
         SyncConfig,
         "from_env",
@@ -144,7 +149,7 @@ async def test_run_sync_manifest_passes_parallel_jobs_to_sync_config(
         json=True,
     )
 
-    exit_code = await cli_main._run_sync(args)
+    exit_code = await sync_cli._run_sync(args)
 
     assert exit_code == 0
     assert captured["parallel_jobs"] == 9
@@ -207,7 +212,7 @@ async def test_run_sync_snapshot_download_uses_orchestrator_summary(
             local_data_dir=tmp_path,
         )
 
-    monkeypatch.setattr(cli_main, "SyncOrchestrator", FakeOrchestrator)
+    monkeypatch.setattr(sync_cli, "SyncOrchestrator", FakeOrchestrator)
     monkeypatch.setattr(
         SyncConfig,
         "from_env",
@@ -231,7 +236,7 @@ async def test_run_sync_snapshot_download_uses_orchestrator_summary(
         json=False,
     )
 
-    exit_code = await cli_main._run_sync(args)
+    exit_code = await sync_cli._run_sync(args)
     capsys.readouterr()
 
     assert exit_code == 0
@@ -269,7 +274,7 @@ async def test_run_sync_snapshot_upload_defaults_chroma_dir_to_tier_namespace(
         )
 
     monkeypatch.delenv("EVERSPRING_CHROMA_DIR", raising=False)
-    monkeypatch.setattr(cli_main, "S3SyncService", FakeService)
+    monkeypatch.setattr(sync_cli, "S3SyncService", FakeService)
     monkeypatch.setattr(
         SyncConfig,
         "from_env",
@@ -293,7 +298,7 @@ async def test_run_sync_snapshot_upload_defaults_chroma_dir_to_tier_namespace(
         json=True,
     )
 
-    exit_code = await cli_main._run_sync(args)
+    exit_code = await sync_cli._run_sync(args)
 
     assert exit_code == 0
     assert captured["model_name"] == "BAAI/bge-small-en-v1.5"
@@ -333,7 +338,7 @@ async def test_run_sync_snapshot_upload_all_uploads_all_default_tiers(
             local_data_dir=tmp_path,
         )
 
-    monkeypatch.setattr(cli_main, "S3SyncService", FakeService)
+    monkeypatch.setattr(sync_cli, "S3SyncService", FakeService)
     monkeypatch.setattr(
         SyncConfig,
         "from_env",
@@ -357,7 +362,7 @@ async def test_run_sync_snapshot_upload_all_uploads_all_default_tiers(
         json=True,
     )
 
-    exit_code = await cli_main._run_sync(args)
+    exit_code = await sync_cli._run_sync(args)
 
     assert exit_code == 0
     assert uploads == [
@@ -412,4 +417,4 @@ async def test_run_sync_snapshot_upload_all_rejects_snapshot_namespace_overrides
     )
 
     with pytest.raises(SystemExit, match="--all cannot be combined"):
-        await cli_main._run_sync(args)
+        await sync_cli._run_sync(args)
