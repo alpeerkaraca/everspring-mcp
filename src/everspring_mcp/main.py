@@ -405,6 +405,37 @@ def _build_parser() -> argparse.ArgumentParser:
     sync.add_argument("--data-dir", default=None, help="Local data directory override")
     sync.add_argument("--json", action="store_true", help="Output JSON summary")
 
+    github = subparsers.add_parser(
+        "ingest-github",
+        help="Ingest docs from GitHub Wiki or Repo",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    github.add_argument(
+        "--owner", default="spring-projects", help="GitHub repository owner"
+    )
+    github.add_argument(
+        "--repo", required=True, help="GitHub repository name (e.g., spring-boot)"
+    )
+    github.add_argument(
+        "--pages",
+        nargs="+",
+        help="Wiki page names to ingest (for Release Notes/Migration Guides)",
+    )
+    github.add_argument(
+        "--files",
+        nargs="+",
+        help="Repository file paths to ingest (e.g., pom.xml, build.gradle)",
+    )
+    github.add_argument(
+        "--module", default=None, type=_parse_module, help="Spring module"
+    )
+    github.add_argument("--version", default=None, help="Version string (e.g., 4.0.0)")
+    github.add_argument("--token", default=None, help="GitHub API token")
+    github.add_argument("--s3-bucket", default=None, help="S3 bucket override")
+    github.add_argument("--s3-region", default=None, help="S3 region override")
+    github.add_argument("--s3-prefix", default=None, help="S3 key prefix override")
+    github.add_argument("--json", action="store_true", help="Output JSON summary")
+
     status = subparsers.add_parser(
         "status",
         help="Show sync status",
@@ -1502,6 +1533,114 @@ async def _run_model_cache(args: argparse.Namespace) -> int:
     return 0
 
 
+async def _run_ingest_github(args: argparse.Namespace) -> int:
+    """Run GitHub ingestion for Wiki pages and repo files."""
+    from everspring_mcp.scraper.github_ingester import GitHubIngester, GitHubIngestionConfig
+    from everspring_mcp.scraper.pipeline import S3Client
+
+    # Setup config
+    ingest_config = GitHubIngestionConfig(
+        github_token=args.token or os.environ.get("GITHUB_TOKEN")
+    )
+    ingester = GitHubIngester(ingest_config)
+
+    # Setup S3 client only when upload configuration is provided.
+    s3_client = None
+    if args.s3_bucket:
+        s3_client = S3Client(
+            bucket_name=args.s3_bucket,
+            region_name=args.s3_region,
+            prefix=args.s3_prefix,
+        )
+    # Setup Storage to ensure files are visible to 'index' command
+    db_path = Path(args.data_dir) / "everspring.db" if args.data_dir else VectorConfig.from_env().db_path
+    storage = StorageManager(db_path)
+    await storage.connect()
+
+    results = []
+    module = args.module or SpringModule.GITHUB_WIKI
+    version_str = args.version or "0.0.0"
+    
+    try:
+        # Handle Wiki Ingestion (New Local Clone Approach)
+        if args.repo:
+            logger.info(f"Starting Wiki ingestion for {args.owner}/{args.repo}")
+            pages = await ingester.ingest_wiki(
+                owner=args.owner,
+                repo=args.repo,
+                module=module,
+                s3_client=s3_client
+            )
+            for page in pages:
+                # Save to local database
+                await storage.documents.save(page)
+                
+                results.append({
+                    "type": "wiki",
+                    "name": page.title,
+                    "status": "success",
+                    "version": page.version.version_string
+                })
+
+        # Handle Specific Repository Files (pom.xml, etc.)
+        if args.files:
+            for file_path in args.files:
+                try:
+                    logger.info(f"Ingesting Repo file: {file_path}")
+                    content = await ingester.fetch_repo_file(args.owner, args.repo, file_path)
+                    
+                    # Create a ScrapedPage for the repo file so it can be indexed
+                    version = SpringVersion.parse(module, version_str)
+                    url = f"https://github.com/{args.owner}/{args.repo}/blob/main/{file_path}"
+                    
+                    page = ScrapedPage.create(
+                        url=url,
+                        module=module,
+                        version=version,
+                        submodule=None,
+                        title=file_path,
+                        raw_html=f"<html><body><pre>{content}</pre></body></html>",
+                        markdown_content=content,
+                        content_type=ContentType.REFERENCE
+                    )
+                    
+                    # Save to local database
+                    await storage.documents.save(page)
+
+                    if s3_client:
+                        url_hash = compute_hash(url)[:16]
+                        s3_key = f"{module.value}/{version.version_string}/metadata/{file_path}"
+                        
+                        s3_client.upload_content(
+                            content=content,
+                            key=s3_key,
+                            content_hash=compute_hash(content),
+                            metadata={
+                                "source-url": url,
+                                "module": module.value,
+                                "file-path": file_path
+                            }
+                        )
+                        results.append({"type": "file", "name": file_path, "status": "success", "s3_key": s3_key})
+                    else:
+                        results.append({"type": "file", "name": file_path, "status": "fetched", "content_length": len(content)})
+                        
+                except Exception as e:
+                    logger.error(f"Failed to ingest repo file {file_path}: {e}")
+                    results.append({"type": "file", "name": file_path, "status": "failed", "error": str(e)})
+
+    finally:
+        await storage.close()
+
+    if args.json:
+        logger.info(json.dumps(results, indent=2))
+    else:
+        success = sum(1 for r in results if r["status"] == "success" or r["status"] == "fetched")
+        logger.info(f"Ingestion complete: {success} succeeded, {len(results) - success} failed")
+        
+    return 0 if all(r["status"] != "failed" for r in results) else 1
+
+
 async def main() -> int:
     parser = _build_parser()
     args = parser.parse_args()
@@ -1510,6 +1649,8 @@ async def main() -> int:
 
     if args.command == "scrape":
         return await _run_scrape(args)
+    if args.command == "ingest-github":
+        return await _run_ingest_github(args)
     if args.command == "sync":
         return await _run_sync(args)
     if args.command == "status":

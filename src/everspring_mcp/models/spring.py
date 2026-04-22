@@ -25,6 +25,7 @@ class SpringModule(str, Enum):
     DATA = "spring-data"
     CLOUD = "spring-cloud"
     AI = "spring-ai"
+    GITHUB_WIKI = "github-wiki"
 
     @property
     def display_name(self) -> str:
@@ -40,7 +41,8 @@ class SpringModule(str, Enum):
             SpringModule.SECURITY: 6,
             SpringModule.DATA: 4,
             SpringModule.CLOUD: 4,
-            SpringModule.AI: 1
+            SpringModule.AI: 1,
+            SpringModule.GITHUB_WIKI: 0,
         }
         return minimums.get(self, 1)
 
@@ -55,13 +57,14 @@ class SpringVersion(VersionedModel):
     - Spring Data: 4+
     - Spring Cloud: 4+
     - Spring AI: 1+
+    - GitHub Wiki: 0+
     """
 
     module: SpringModule = Field(
         description="The Spring module this version applies to",
     )
     major: int = Field(
-        ge=1,
+        ge=0,
         description="Major version number",
     )
     minor: int = Field(
