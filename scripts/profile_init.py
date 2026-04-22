@@ -77,8 +77,8 @@ async def main():
 
     # 9. Test embedding
     with timer("embedder.embed_texts(['test'])"):
-        vectors = await embedder.embed_texts(["test query"])
-        logger.info("       Vector dim: %d", len(vectors[0]))
+        embeddings = await embedder.embed_texts(["test query"])
+        logger.info("       Vector dim: %d", len(embeddings[0]["dense"]))
 
     # 10. Import BM25Index
     with timer("Import BM25Index"):

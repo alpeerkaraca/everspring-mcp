@@ -77,3 +77,5 @@ report.md
 a.ps1
 infrastructure/ecs-fargate/.terraform.lock.hcl
 .gemini/agents/
+everspring_mcp.tar.gz
+scripts/reindex_all_tiers.sh

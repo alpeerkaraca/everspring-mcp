@@ -76,6 +76,7 @@ class _VectorPayload:
     content: str
     metadata: dict[str, Any]
     embedding: list[float]
+    sparse_weights: dict[str, float] | None = None
 
 
 _WORKER_CHUNKER_CACHE: dict[tuple[str, int, int], MarkdownChunker] = {}
@@ -117,7 +118,9 @@ def _load_metadata(path: Path) -> dict[str, Any]:
         return {}
 
 
-def _worker_chunker(model_name: str, max_tokens: int, overlap_tokens: int) -> MarkdownChunker:
+def _worker_chunker(
+    model_name: str, max_tokens: int, overlap_tokens: int
+) -> MarkdownChunker:
     key = (model_name, max_tokens, overlap_tokens)
     chunker = _WORKER_CHUNKER_CACHE.get(key)
     if chunker is None:
@@ -249,7 +252,9 @@ class VectorIndexer:
         upsert_batch_size = max(1, self.config.chroma_upsert_batch_size)
         chunk_max_tokens = int(self.config.max_tokens)
         chunk_overlap_tokens = int(self.config.overlap_tokens)
-        prefetch_chunks_limit = max(embed_batch_size, self.config.prefetch_batches * embed_batch_size)
+        prefetch_chunks_limit = max(
+            embed_batch_size, self.config.prefetch_batches * embed_batch_size
+        )
 
         total_chunks = 0
         indexed_docs = 0
@@ -296,7 +301,10 @@ class VectorIndexer:
                     while len(pending_vectors) >= upsert_batch_size:
                         vector_batch = pending_vectors[:upsert_batch_size]
                         del pending_vectors[:upsert_batch_size]
-                        flushed_chunks, flushed_docs = await self._flush_vector_payloads(
+                        (
+                            flushed_chunks,
+                            flushed_docs,
+                        ) = await self._flush_vector_payloads(
                             payloads=vector_batch,
                             doc_chunk_totals=doc_chunk_totals,
                             doc_chunk_indexed=doc_chunk_indexed,
@@ -306,7 +314,9 @@ class VectorIndexer:
                         flushed_total_docs += flushed_docs
                     return flushed_total_chunks, flushed_total_docs
 
-                async def _consume_prepared(prepared: _PreparedDocument) -> tuple[int, int]:
+                async def _consume_prepared(
+                    prepared: _PreparedDocument,
+                ) -> tuple[int, int]:
                     nonlocal heartbeat_emitted
                     consumed_chunks = 0
                     consumed_docs = 0
@@ -314,7 +324,9 @@ class VectorIndexer:
                     doc_chunk_indexed.setdefault(prepared.document_id, 0)
                     pending_chunks.extend(prepared.chunks)
                     if progress_enabled:
-                        chunks_bar.total = (chunks_bar.total or 0) + len(prepared.chunks)
+                        chunks_bar.total = (chunks_bar.total or 0) + len(
+                            prepared.chunks
+                        )
                         chunks_bar.refresh()
 
                     while len(pending_chunks) >= embed_batch_size:
@@ -324,7 +336,9 @@ class VectorIndexer:
                             texts=[item.content for item in chunk_batch],
                             progress_bar=chunks_bar if progress_enabled else None,
                         )
-                        pending_vectors.extend(self._to_vector_payloads(chunk_batch, vectors))
+                        pending_vectors.extend(
+                            self._to_vector_payloads(chunk_batch, vectors)
+                        )
                         flushed_chunks, flushed_docs = await _flush_pending_vectors()
                         consumed_chunks += flushed_chunks
                         consumed_docs += flushed_docs
@@ -400,7 +414,9 @@ class VectorIndexer:
                             texts=[item.content for item in chunk_batch],
                             progress_bar=chunks_bar if progress_enabled else None,
                         )
-                        pending_vectors.extend(self._to_vector_payloads(chunk_batch, vectors))
+                        pending_vectors.extend(
+                            self._to_vector_payloads(chunk_batch, vectors)
+                        )
                         flushed_chunks, flushed_docs = await _flush_pending_vectors()
                         total_chunks += flushed_chunks
                         indexed_docs += flushed_docs
@@ -488,20 +504,34 @@ class VectorIndexer:
     @staticmethod
     def _to_vector_payloads(
         chunks: list[_PreparedChunk],
-        vectors: list[list[float]],
+        vectors: list[dict[str, Any]],
     ) -> list[_VectorPayload]:
         if len(chunks) != len(vectors):
             raise RuntimeError("Chunk/vector count mismatch during embedding")
-        return [
-            _VectorPayload(
-                chunk_id=chunk.chunk_id,
-                document_id=chunk.document_id,
-                content=chunk.content,
-                metadata=chunk.metadata,
-                embedding=vectors[i],
+
+        payloads = []
+        for i, chunk in enumerate(chunks):
+            dense = vectors[i]["dense"]
+            sparse = vectors[i]["sparse"]
+
+            # Metadata Size Protection: Top 150 tokens
+            top_sparse = None
+            if sparse:
+                top_sparse = dict(
+                    sorted(sparse.items(), key=lambda x: x[1], reverse=True)[:150]
+                )
+
+            payloads.append(
+                _VectorPayload(
+                    chunk_id=chunk.chunk_id,
+                    document_id=chunk.document_id,
+                    content=chunk.content,
+                    metadata=chunk.metadata,
+                    embedding=dense,
+                    sparse_weights=top_sparse,
+                )
             )
-            for i, chunk in enumerate(chunks)
-        ]
+        return payloads
 
     async def _flush_vector_payloads(
         self,
@@ -513,18 +543,30 @@ class VectorIndexer:
         if not payloads:
             return 0, 0
 
+        # Safe Metadata Storage: Serialize sparse weights
+        metadatas = []
+        for item in payloads:
+            meta = item.metadata.copy()
+            if item.sparse_weights:
+                meta["sparse_weights"] = json.dumps(
+                    item.sparse_weights, separators=(",", ":")
+                )
+            metadatas.append(meta)
+
         await asyncio.to_thread(
             self.chroma.upsert,
             ids=[item.chunk_id for item in payloads],
             embeddings=[item.embedding for item in payloads],
             documents=[item.content for item in payloads],
-            metadatas=[item.metadata for item in payloads],
+            metadatas=metadatas,
         )
 
         touched_doc_ids: set[str] = set()
         for item in payloads:
             touched_doc_ids.add(item.document_id)
-            doc_chunk_indexed[item.document_id] = doc_chunk_indexed.get(item.document_id, 0) + 1
+            doc_chunk_indexed[item.document_id] = (
+                doc_chunk_indexed.get(item.document_id, 0) + 1
+            )
 
         completed_docs = [
             doc_id
@@ -553,7 +595,7 @@ class VectorIndexer:
         self,
         texts: list[str],
         progress_bar: Any | None = None,
-    ) -> list[list[float]]:
+    ) -> list[dict[str, Any]]:
         logger.info("Embedding batch of %d texts", len(texts))
         vectors = await self.embedder.embed_texts(texts)
         if progress_bar is not None:
@@ -585,7 +627,12 @@ class VectorIndexer:
 
         url_hash = markdown_path.stem
         # Legacy metadata sits in a metadata/ subfolder keyed by URL hash.
-        return self.config.docs_dir / markdown_path.parent / "metadata" / f"{url_hash}.json"
+        return (
+            self.config.docs_dir
+            / markdown_path.parent
+            / "metadata"
+            / f"{url_hash}.json"
+        )
 
     @staticmethod
     def _load_metadata(path: Path) -> dict:

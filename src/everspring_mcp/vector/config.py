@@ -144,8 +144,8 @@ class VectorConfig(BaseModel):
     @classmethod
     def validate_path(cls, v: str | Path) -> Path:
         """Convert string to Path."""
-        return Path(v) if isinstance(v, str) else v
-
+        path_obj = Path(v) if isinstance(v, str) else v
+        return path_obj.expanduser().resolve()
     @field_validator("embedding_tier")
     @classmethod
     def validate_embedding_tier(cls, value: str) -> str:
@@ -163,7 +163,9 @@ class VectorConfig(BaseModel):
             return data
 
         tier_value = data.get("embedding_tier", MAIN_TIER)
-        normalized_tier = tier_value.strip().lower() if isinstance(tier_value, str) else MAIN_TIER
+        normalized_tier = (
+            tier_value.strip().lower() if isinstance(tier_value, str) else MAIN_TIER
+        )
         if normalized_tier in TIER_CHUNKING_DEFAULTS:
             chunk_size, overlap_tokens = chunk_defaults_for_tier(normalized_tier)
             if data.get("max_tokens") is None:

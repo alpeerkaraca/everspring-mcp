@@ -133,8 +133,8 @@ class SyncConfig(BaseModel):
     @classmethod
     def validate_path(cls, v: str | Path) -> Path:
         """Convert string to Path."""
-        return Path(v) if isinstance(v, str) else v
-
+        path_obj = Path(v) if isinstance(v, str) else v
+        return path_obj.expanduser().resolve()
     @field_validator("model_tier")
     @classmethod
     def validate_model_tier(cls, value: str) -> str:

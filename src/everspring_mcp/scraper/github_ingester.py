@@ -8,6 +8,7 @@ This module provides GitHubIngester for fetching and processing:
 
 from __future__ import annotations
 
+import os
 import re
 import shlex
 import subprocess
@@ -152,17 +153,39 @@ class GitHubIngester:
         logger.info(f"Converting {adoc_path} to {output_md}")
         
         try:
-            # Build argv list to avoid shell injection; shlex.split handles
-            # configured command options (e.g. "npx downdoc") safely.
-            cmd = shlex.split(self.config.downdoc_command) + [str(adoc_path), "-o", str(output_md)]
-            subprocess.run(
-                cmd,
-                check=True,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                stdin=subprocess.DEVNULL
-            )
+            import sys
+            import shlex
+            
+            # Resolve the base command
+            base_cmd = shlex.split(self.config.downdoc_command)
+            
+            use_shell = sys.platform == "win32"
+            
+            # If using shell=True on Windows, it's often safer to pass the
+            # command as a single string rather than a list.
+            if use_shell:
+                cmd_str = f'{" ".join(base_cmd)} "{adoc_path}" -o "{output_md}"'
+                subprocess.run(
+                    cmd_str,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    stdin=subprocess.DEVNULL,
+                    shell=True
+                )
+            else:
+                # POSIX (Linux/Mac/Fargate) execution
+                cmd = base_cmd + [str(adoc_path), "-o", str(output_md)]
+                subprocess.run(
+                    cmd,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    stdin=subprocess.DEVNULL,
+                    shell=False
+                )
             
             if not output_md.exists():
                 raise FileNotFoundError(f"downdoc failed to create {output_md}")

@@ -62,7 +62,9 @@ def _mock_dense_results() -> list[dict[str, Any]]:
 
 
 @pytest.mark.asyncio
-async def test_search_deduplicates_urls(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+async def test_search_deduplicates_urls(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     config = VectorConfig(data_dir=tmp_path, chroma_dir=tmp_path / "chroma")
     retriever = HybridRetriever(config=config)
 
@@ -81,7 +83,11 @@ async def test_search_deduplicates_urls(monkeypatch: pytest.MonkeyPatch, tmp_pat
     monkeypatch.setattr(
         retriever._bm25,
         "search",
-        lambda *args, **kwargs: [SparseResult("doc2-0"), SparseResult("doc1-0"), SparseResult("doc3-0")],
+        lambda *args, **kwargs: [
+            SparseResult("doc2-0"),
+            SparseResult("doc1-0"),
+            SparseResult("doc3-0"),
+        ],
     )
 
     results = await retriever.search("datasource", top_k=3, deduplicate_urls=True)
@@ -114,7 +120,11 @@ async def test_search_no_dedup_returns_multiple_chunks(
     monkeypatch.setattr(
         retriever._bm25,
         "search",
-        lambda *args, **kwargs: [SparseResult("doc2-0"), SparseResult("doc1-0"), SparseResult("doc3-0")],
+        lambda *args, **kwargs: [
+            SparseResult("doc2-0"),
+            SparseResult("doc1-0"),
+            SparseResult("doc3-0"),
+        ],
     )
 
     results = await retriever.search("datasource", top_k=3, deduplicate_urls=False)
@@ -128,7 +138,9 @@ def test_build_bm25_index_fetches_chroma_in_batches(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    config = VectorConfig(data_dir=tmp_path, chroma_dir=tmp_path / "chroma", embedding_tier="slim")
+    config = VectorConfig(
+        data_dir=tmp_path, chroma_dir=tmp_path / "chroma", embedding_tier="slim"
+    )
     retriever = HybridRetriever(config=config)
 
     class FakeCollection:
@@ -151,7 +163,9 @@ def test_build_bm25_index_fetches_chroma_in_batches(
             return {
                 "ids": ids,
                 "documents": [f"content-{i}" for i in range(offset, end)],
-                "metadatas": [{"module": "spring-boot", "version_major": 4} for _ in ids],
+                "metadatas": [
+                    {"module": "spring-boot", "version_major": 4} for _ in ids
+                ],
             }
 
     fake_collection = FakeCollection()
@@ -169,7 +183,9 @@ def test_build_bm25_index_fetches_chroma_in_batches(
         captured["metadatas"] = len(metadatas)
 
     monkeypatch.setattr(retriever._bm25, "build", fake_build)
-    monkeypatch.setattr(retriever._bm25, "save", lambda: captured.setdefault("saved", 1))
+    monkeypatch.setattr(
+        retriever._bm25, "save", lambda: captured.setdefault("saved", 1)
+    )
 
     retriever.build_bm25_index()
 
@@ -187,24 +203,48 @@ def test_build_bm25_index_fetches_chroma_in_batches(
 
 
 @pytest.mark.asyncio
-async def test_search_main_tier_skips_bm25(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    config = VectorConfig(data_dir=tmp_path, chroma_dir=tmp_path / "chroma", embedding_tier="main")
+async def test_search_main_tier_uses_native_hybrid(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = VectorConfig(
+        data_dir=tmp_path, chroma_dir=tmp_path / "chroma", embedding_tier="main"
+    )
     retriever = HybridRetriever(config=config)
 
-    async def fake_dense_search(
+    from everspring_mcp.models.metadata import SearchResult
+
+    async def fake_hybrid_native(
         query: str,
         top_k: int,
+        fetch_k: int,
         where: dict[str, Any] | None,
-    ) -> list[dict[str, Any]]:
-        del query, top_k, where
-        return _mock_dense_results()
+        deduplicate_urls: bool,
+    ) -> list[SearchResult]:
+        return [
+            SearchResult(
+                id="native-1",
+                content="native content",
+                title="Native",
+                url="https://docs.spring.io/native",
+                module="spring-boot",
+                submodule=None,
+                version_major=4,
+                version_minor=0,
+                score=0.9,
+                dense_rank=1,
+                sparse_rank=1,
+                section_path="",
+                has_code=False,
+            )
+        ]
 
     def fail_bm25_search(*args: Any, **kwargs: Any) -> list[object]:
         raise AssertionError("BM25 should not be used for main tier")
 
-    monkeypatch.setattr(retriever, "_dense_search", fake_dense_search)
+    monkeypatch.setattr(retriever, "_hybrid_search_native", fake_hybrid_native)
     monkeypatch.setattr(retriever._bm25, "search", fail_bm25_search)
 
     results = await retriever.search("datasource", top_k=2, deduplicate_urls=True)
-    assert len(results) == 2
-    assert all(r.sparse_rank is None for r in results)
+    assert len(results) == 1
+    assert results[0].id == "native-1"
+    assert results[0].sparse_rank == 1

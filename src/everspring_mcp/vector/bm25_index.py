@@ -32,7 +32,7 @@ class BM25SearchResult:
 
 class BM25Index:
     """BM25 sparse index for keyword-based retrieval.
-    
+
     Builds and persists a BM25Okapi index from document corpus.
     Supports filtering by metadata before search.
     """
@@ -63,7 +63,7 @@ class BM25Index:
         metadatas: list[dict[str, Any]],
     ) -> None:
         """Build BM25 index from documents.
-        
+
         Args:
             doc_ids: Document identifiers
             documents: Document text content
@@ -99,7 +99,7 @@ class BM25Index:
 
     def load(self) -> bool:
         """Load index from disk.
-        
+
         Returns:
             True if loaded successfully, False if no index file exists
         """
@@ -115,7 +115,9 @@ class BM25Index:
         self._documents = data["documents"]
         self._metadatas = data["metadatas"]
         self._index = BM25Okapi(data["tokenized"])
-        logger.info(f"BM25 index loaded ({len(self._doc_ids)} docs) in {time.perf_counter() - start:.2f}s")
+        logger.info(
+            f"BM25 index loaded ({len(self._doc_ids)} docs) in {time.perf_counter() - start:.2f}s"
+        )
         return True
 
     def search(
@@ -126,13 +128,13 @@ class BM25Index:
         version_major: int | None = None,
     ) -> list[BM25SearchResult]:
         """Search index with BM25 scoring.
-        
+
         Args:
             query: Search query text
             top_k: Number of results to return
             module: Optional module filter
             version_major: Optional major version filter
-            
+
         Returns:
             List of BM25SearchResult sorted by score (descending)
         """
@@ -147,13 +149,17 @@ class BM25Index:
         scores = self._index.get_scores(query_tokens)
 
         # Create (doc_id, score, metadata) tuples
-        scored = list(zip(self._doc_ids, scores, self._metadatas))
+        scored = list(zip(self._doc_ids, scores, self._metadatas, strict=False))
 
         # Apply filters
         if module:
             scored = [(d, s, m) for d, s, m in scored if m.get("module") == module]
         if version_major is not None:
-            scored = [(d, s, m) for d, s, m in scored if m.get("version_major") == version_major]
+            scored = [
+                (d, s, m)
+                for d, s, m in scored
+                if m.get("version_major") == version_major
+            ]
 
         # Sort by score descending
         scored.sort(key=lambda x: x[1], reverse=True)
@@ -161,18 +167,20 @@ class BM25Index:
         # Return top_k results with rank
         results = []
         for rank, (doc_id, score, _) in enumerate(scored[:top_k], start=1):
-            results.append(BM25SearchResult(
-                doc_id=doc_id,
-                score=float(score),
-                rank=rank,
-            ))
+            results.append(
+                BM25SearchResult(
+                    doc_id=doc_id,
+                    score=float(score),
+                    rank=rank,
+                )
+            )
 
         return results
 
     @staticmethod
     def _tokenize(text: str) -> list[str]:
         """Tokenize text for BM25.
-        
+
         Simple whitespace + punctuation tokenization with lowercasing.
         """
         # Lowercase and split on non-alphanumeric
@@ -181,7 +189,7 @@ class BM25Index:
 
     def get_document(self, doc_id: str) -> tuple[str, dict[str, Any]] | None:
         """Get document content and metadata by ID.
-        
+
         Returns:
             Tuple of (content, metadata) or None if not found
         """

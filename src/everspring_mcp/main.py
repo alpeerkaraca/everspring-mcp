@@ -20,12 +20,13 @@ from pathlib import Path
 from typing import Any
 
 from chromadb.errors import InvalidArgumentError
+from everspring_mcp.models.base import compute_hash
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
 from everspring_mcp.mcp.prompt import PromptBuilder
-from everspring_mcp.models.content import ContentType
+from everspring_mcp.models.content import ContentType, ScrapedPage
 from everspring_mcp.models.spring import SpringModule, SpringVersion
 from everspring_mcp.scraper.pipeline import PipelineConfig, ScraperPipeline
 from everspring_mcp.scraper.registry import SubmoduleRegistry
@@ -41,7 +42,9 @@ from everspring_mcp.vector.embeddings import (
 )
 from everspring_mcp.vector.indexer import VectorIndexer
 from everspring_mcp.vector.retriever import HybridRetriever
+from dotenv import load_dotenv
 
+load_dotenv(dotenv_path="./.env")
 logger = logging.getLogger("everspring_mcp")
 console = Console(stderr=True)
 
@@ -437,6 +440,7 @@ def _build_parser() -> argparse.ArgumentParser:
     github.add_argument("--s3-bucket", default=None, help="S3 bucket override")
     github.add_argument("--s3-region", default=None, help="S3 region override")
     github.add_argument("--s3-prefix", default=None, help="S3 key prefix override")
+    github.add_argument("--data-dir", default=None, help="Local data directory override")
     github.add_argument("--json", action="store_true", help="Output JSON summary")
 
     status = subparsers.add_parser(
@@ -1566,14 +1570,25 @@ async def _run_ingest_github(args: argparse.Namespace) -> int:
     )
     ingester = GitHubIngester(ingest_config)
 
-    # Setup S3 client only when upload configuration is provided.
+    # Setup S3 Client
     s3_client = None
-    if args.s3_bucket:
+    if args.s3_bucket or args.s3_region or args.s3_prefix:
         s3_client = S3Client(
-            bucket_name=args.s3_bucket,
-            region_name=args.s3_region,
-            prefix=args.s3_prefix,
+            bucket=args.s3_bucket or "everspring-mcp-kb",
+            prefix=args.s3_prefix or "spring-docs/raw-data",
+            region=args.s3_region or "eu-central-1",
         )
+    else:
+        # Fallback to env
+        try:
+            pipeline_config = PipelineConfig.from_env()
+            s3_client = S3Client(
+                bucket=pipeline_config.s3_bucket,
+                prefix=pipeline_config.s3_prefix,
+                region=pipeline_config.aws_region,
+            )
+        except Exception as e:
+            logger.debug(f"S3 not configured via env, skipping upload: {e}")
     # Setup Storage to ensure files are visible to 'index' command
     db_path = Path(args.data_dir) / "everspring.db" if args.data_dir else VectorConfig.from_env().db_path
     storage = StorageManager(db_path)
