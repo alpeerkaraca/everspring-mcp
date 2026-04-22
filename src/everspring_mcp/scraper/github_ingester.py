@@ -8,12 +8,9 @@ This module provides GitHubIngester for fetching and processing:
 
 from __future__ import annotations
 
-import os
 import re
-import shutil
 import subprocess
 import tempfile
-from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
