@@ -1544,10 +1544,14 @@ async def _run_ingest_github(args: argparse.Namespace) -> int:
     )
     ingester = GitHubIngester(ingest_config)
 
-    # Setup S3 Client if needed
+    # Setup S3 client only when upload configuration is provided.
     s3_client = None
-    # ... (existing S3 setup logic)
-    
+    if args.s3_bucket:
+        s3_client = S3Client(
+            bucket_name=args.s3_bucket,
+            region_name=args.s3_region,
+            prefix=args.s3_prefix,
+        )
     # Setup Storage to ensure files are visible to 'index' command
     db_path = Path(args.data_dir) / "everspring.db" if args.data_dir else VectorConfig.from_env().db_path
     storage = StorageManager(db_path)
