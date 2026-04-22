@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from collections import defaultdict
 from functools import partial
@@ -87,14 +88,17 @@ class HybridRetriever:
         where = self._build_where_filter(module, version_major)
 
         if self._use_native_main_retrieval:
-            dense_results = await self._dense_search(query, max(fetch_k, top_k), where)
-            return self._dense_results_to_search_results(
-                dense_results=dense_results,
+            # Native BGE-M3 Hybrid Retrieval Path
+            results = await self._hybrid_search_native(
+                query=query,
                 top_k=top_k,
+                fetch_k=max(fetch_k, top_k * 2),
+                where=where,
                 deduplicate_urls=deduplicate_urls,
             )
+            return results
 
-        # Run both retrievals in parallel
+        # Fallback BM25 Hybrid Path (Slim/XSlim)
         logger.debug(
             f"Searching query='{query[:50]}...' top_k={top_k} module={module} version={version_major}"
         )
@@ -185,44 +189,137 @@ class HybridRetriever:
 
         return results
 
-    @staticmethod
-    def _dense_results_to_search_results(
-        dense_results: list[dict[str, Any]],
+    async def _hybrid_search_native(
+        self,
+        query: str,
         top_k: int,
+        fetch_k: int,
+        where: dict[str, Any] | None,
         deduplicate_urls: bool,
     ) -> list[SearchResult]:
-        results: list[SearchResult] = []
-        seen_urls: set[str] = set()
-        for rank, item in enumerate(dense_results, start=1):
-            meta = item.get("metadata", {})
-            url = str(meta.get("url", "")).strip()
-            if deduplicate_urls and url:
-                if url in seen_urls:
-                    continue
-                seen_urls.add(url)
+        """BGE-M3 Native Hybrid Search."""
+        query_outputs = await self._embedder.embed_texts([query])
+        query_dense = query_outputs[0]["dense"]
+        query_sparse = query_outputs[0]["sparse"]
 
-            distance = item.get("distance", 0.0) or 0.0
-            score = 1.0 / (1.0 + max(float(distance), 0.0))
-            results.append(
-                SearchResult(
-                    id=item.get("id", ""),
-                    content=item.get("content", ""),
-                    title=meta.get("title", ""),
-                    url=url,
-                    module=meta.get("module", ""),
-                    submodule=meta.get("submodule") or None,
-                    version_major=meta.get("version_major", 0),
-                    version_minor=meta.get("version_minor", 0),
-                    score=score,
-                    dense_rank=rank,
-                    sparse_rank=None,
-                    section_path=meta.get("section_path", ""),
-                    has_code=meta.get("has_code", False),
+        # 1. Fetch dense candidates
+        query_func = partial(
+            self._chroma.query,
+            query_embeddings=[query_dense],
+            n_results=fetch_k,
+            where=where,
+        )
+        raw_results = await asyncio.to_thread(query_func)
+
+        if not raw_results["ids"] or not raw_results["ids"][0]:
+            return []
+
+        # 2. Optimized re-ranking via RRF in a separate thread
+        def _rerank_task() -> list[SearchResult]:
+            docs = []
+            for i, doc_id in enumerate(raw_results["ids"][0]):
+                meta = (
+                    raw_results["metadatas"][0][i] if raw_results["metadatas"] else {}
                 )
-            )
-            if len(results) >= top_k:
-                break
-        return results
+                content = (
+                    raw_results["documents"][0][i] if raw_results["documents"] else ""
+                )
+                distance = (
+                    raw_results["distances"][0][i] if raw_results["distances"] else 0
+                )
+
+                # Dense score from distance
+                dense_score = 1.0 / (1.0 + max(float(distance), 0.0))
+
+                # Sparse score from dot product
+                sparse_score = 0.0
+                if query_sparse and "sparse_weights" in meta:
+                    try:
+                        doc_sparse = json.loads(meta["sparse_weights"])
+                        # Fast dot product calculation
+                        sparse_score = sum(
+                            query_sparse.get(k, 0.0) * v for k, v in doc_sparse.items()
+                        )
+                    except json.JSONDecodeError:
+                        logger.warning(
+                            f"Corrupted sparse_weights metadata in chunk {doc_id}"
+                        )
+                    except Exception as e:
+                        logger.error(
+                            f"Error calculating sparse score for chunk {doc_id}: {e}"
+                        )
+
+                docs.append(
+                    {
+                        "id": doc_id,
+                        "content": content,
+                        "metadata": meta,
+                        "dense_score": dense_score,
+                        "sparse_score": sparse_score,
+                    }
+                )
+
+            # Calculate Dense Ranks
+            docs.sort(key=lambda x: x["dense_score"], reverse=True)
+            for rank, d in enumerate(docs, 1):
+                d["dense_rank"] = rank
+
+            # Calculate Sparse Ranks
+            docs.sort(key=lambda x: x["sparse_score"], reverse=True)
+            for rank, d in enumerate(docs, 1):
+                d["sparse_rank"] = rank
+
+            # Compute RRF
+            final_results: list[SearchResult] = []
+            seen_urls: set[str] = set()
+
+            # Sort by fused RRF score
+            for d in docs:
+                dense_rrf = 1.0 / (self.RRF_K + d["dense_rank"])
+                # Only apply sparse RRF if there was a positive overlap
+                sparse_rrf = (
+                    1.0 / (self.RRF_K + d["sparse_rank"])
+                    if d["sparse_score"] > 0
+                    else 0
+                )
+                d["rrf_score"] = (self.dense_weight * dense_rrf) + (
+                    self.sparse_weight * sparse_rrf
+                )
+
+            docs.sort(key=lambda x: x["rrf_score"], reverse=True)
+
+            for d in docs:
+                meta = d["metadata"]
+                url = str(meta.get("url", "")).strip()
+
+                if deduplicate_urls and url:
+                    if url in seen_urls:
+                        continue
+                    seen_urls.add(url)
+
+                final_results.append(
+                    SearchResult(
+                        id=d["id"],
+                        content=d["content"],
+                        title=meta.get("title", ""),
+                        url=url,
+                        module=meta.get("module", ""),
+                        submodule=meta.get("submodule") or None,
+                        version_major=meta.get("version_major", 0),
+                        version_minor=meta.get("version_minor", 0),
+                        score=d["rrf_score"],
+                        dense_rank=d["dense_rank"],
+                        sparse_rank=d["sparse_rank"] if d["sparse_score"] > 0 else None,
+                        section_path=meta.get("section_path", ""),
+                        has_code=meta.get("has_code", False),
+                    )
+                )
+                if len(final_results) >= top_k:
+                    break
+
+            return final_results
+
+        return await asyncio.to_thread(_rerank_task)
 
     async def _dense_search(
         self,
@@ -232,11 +329,12 @@ class HybridRetriever:
     ) -> list[dict[str, Any]]:
         """Run dense retrieval via ChromaDB."""
 
-        query_vectors = await self._embedder.embed_texts([query])
+        query_outputs = await self._embedder.embed_texts([query])
+        query_dense = query_outputs[0]["dense"]
 
         query_func = partial(
             self._chroma.query,
-            query_embeddings=query_vectors,
+            query_embeddings=[query_dense],
             n_results=top_k,
             where=where,
         )
@@ -249,9 +347,15 @@ class HybridRetriever:
                 docs.append(
                     {
                         "id": doc_id,
-                        "content": results["documents"][0][i] if results["documents"] else "",
-                        "metadata": results["metadatas"][0][i] if results["metadatas"] else {},
-                        "distance": results["distances"][0][i] if results["distances"] else 0,
+                        "content": results["documents"][0][i]
+                        if results["documents"]
+                        else "",
+                        "metadata": results["metadatas"][0][i]
+                        if results["metadatas"]
+                        else {},
+                        "distance": results["distances"][0][i]
+                        if results["distances"]
+                        else 0,
                     }
                 )
 
@@ -304,7 +408,9 @@ class HybridRetriever:
         Call this after indexing new documents.
         """
         if self._use_native_main_retrieval:
-            logger.info("Skipping BM25 build for tier=main; using native model retrieval path")
+            logger.info(
+                "Skipping BM25 build for tier=main; using native model retrieval path"
+            )
             return
         collection = self._chroma.get_collection()
 

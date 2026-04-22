@@ -122,12 +122,16 @@ class MarkdownChunker:
         start = 0
         while start < len(tokens):
             end = min(start + self.max_tokens, len(tokens))
-            chunk_text = self._tokenizer.decode(tokens[start:end], skip_special_tokens=True).strip()
+            chunk_text = self._tokenizer.decode(
+                tokens[start:end], skip_special_tokens=True
+            ).strip()
 
             if end < len(tokens):
                 chunk_text = self._find_natural_break(chunk_text)
             if not chunk_text:
-                chunk_text = self._tokenizer.decode(tokens[start:end], skip_special_tokens=True).strip()
+                chunk_text = self._tokenizer.decode(
+                    tokens[start:end], skip_special_tokens=True
+                ).strip()
             if not chunk_text:
                 break
 
@@ -179,12 +183,14 @@ class MarkdownChunker:
                     continue
                 has_code = "```" in stripped or "`" in stripped
                 content_hash = self._hash_content(stripped)
-                chunks.append(MarkdownChunk(
-                    content=stripped,
-                    section_path=section_path,
-                    has_code=has_code,
-                    content_hash=content_hash,
-                ))
+                chunks.append(
+                    MarkdownChunk(
+                        content=stripped,
+                        section_path=section_path,
+                        has_code=has_code,
+                        content_hash=content_hash,
+                    )
+                )
 
         return chunks
 

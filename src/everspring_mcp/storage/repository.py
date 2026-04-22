@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import aiosqlite
+from everspring_mcp.models.content import ScrapedPage
 from pydantic import BaseModel, ConfigDict, Field
 
 from everspring_mcp.models.spring import SpringModule
@@ -266,6 +267,36 @@ class DocumentRepository:
         )
         await self.db.commit()
         logger.debug("Upserted document: %s", doc.id)
+
+    async def save(self, page: ScrapedPage, s3_key: str = "", file_path: str = "") -> None:
+        """Convert ScrapedPage to DocumentRecord and upsert.
+
+        Args:
+            page: Scraped page model
+            s3_key: Optional S3 key
+            file_path: Optional local file path
+        """
+        from everspring_mcp.models.base import compute_hash
+
+        doc = DocumentRecord(
+            id=compute_hash(str(page.url)),
+            url=str(page.url),
+            title=page.title,
+            module=page.module.value,
+            submodule=page.submodule,
+            major_version=page.version.major,
+            minor_version=page.version.minor,
+            patch_version=page.version.patch,
+            content_hash=page.content_hash,
+            file_path=file_path or s3_key,  # Fallback
+            s3_key=s3_key,
+            size_bytes=len(page.markdown_content.encode("utf-8")),
+            scraped_at=page.scraped_at,
+            synced_at=datetime.now(UTC),  # Consider it synced if we are saving it manually
+            schema_version="1.0",
+            is_indexed=False,
+        )
+        await self.upsert(doc)
 
     async def get_by_id(self, doc_id: str) -> DocumentRecord | None:
         """Get document by ID.

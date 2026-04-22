@@ -496,7 +496,6 @@ class SpringBrowser:
                     status_code=response.status,
                 )
 
-            logger.info(f"Navigation successful: {response.status}")
             return response
 
         except PlaywrightTimeoutError as e:

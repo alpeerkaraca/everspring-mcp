@@ -5,7 +5,9 @@ from __future__ import annotations
 import sys
 import types
 from pathlib import Path
+from typing import Any
 
+import numpy as np
 import pytest
 
 from everspring_mcp.vector.chunking import MarkdownChunker
@@ -88,13 +90,13 @@ async def test_indexer_no_docs(tmp_path: Path) -> None:
 async def test_embedder_batches(monkeypatch: pytest.MonkeyPatch) -> None:
     embedder = Embedder(model_name="google/embedding-gemma-300m", batch_size=2)
 
-    async def fake_embed_texts(texts: list[str]) -> list[list[float]]:
-        return [[0.1] * 3 for _ in texts]
+    async def fake_embed_texts(texts: list[str]) -> list[dict[str, Any]]:
+        return [{"dense": [0.1] * 3, "sparse": None} for _ in texts]
 
     monkeypatch.setattr(embedder, "embed_texts", fake_embed_texts)
     vectors = await embedder.embed_batches(["a", "b", "c"])
     assert len(vectors) == 3
-    assert all(len(v) == 3 for v in vectors)
+    assert all(len(v["dense"]) == 3 for v in vectors)
 
 
 @pytest.mark.asyncio
@@ -257,7 +259,9 @@ def test_chunker_tokenizer_encode_is_quiet(monkeypatch: pytest.MonkeyPatch) -> N
 
 
 @pytest.mark.asyncio
-async def test_embedder_truncates_over_limit_inputs(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_embedder_truncates_over_limit_inputs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     class FakeTokenizer:
         def __init__(self) -> None:
             self.verbose_calls: list[bool] = []
@@ -293,18 +297,23 @@ async def test_embedder_truncates_over_limit_inputs(monkeypatch: pytest.MonkeyPa
             self.tokenizer = FakeTokenizer()
             self.last_texts: list[str] = []
 
-        def embed(
+        def encode(
             self,
             texts: list[str],
             batch_size: int,
-        ) -> list[FakeVector]:
-            del batch_size
+            **kwargs: Any,
+        ) -> dict[str, Any]:
+            del batch_size, kwargs
             self.last_texts = list(texts)
-            return [FakeVector([0.1, 0.2, 0.3]) for _ in texts]
+            return {
+                "dense_vecs": np.array([[0.1, 0.2, 0.3] for _ in texts]),
+                "lexical_weights": [None for _ in texts],
+            }
 
     fake_model = FakeModel()
     embedder = Embedder(model_name="fake/model")
-    monkeypatch.setattr(embedder, "ensure_model_loaded", lambda: fake_model)
+    # Patch the strategy's _ensure_loaded and the strategy itself if needed
+    monkeypatch.setattr(embedder._strategy, "_ensure_loaded", lambda: fake_model)
 
     vectors = await embedder.embed_texts(["abcdefghi", "ok"])
 
@@ -342,8 +351,8 @@ async def test_embed_with_progress_updates_progress_bar() -> None:
     class FakeEmbedder:
         batch_size = 2
 
-        async def embed_texts(self, texts: list[str]) -> list[list[float]]:
-            return [[0.1, 0.2, 0.3] for _ in texts]
+        async def embed_texts(self, texts: list[str]) -> list[dict[str, Any]]:
+            return [{"dense": [0.1, 0.2, 0.3], "sparse": None} for _ in texts]
 
     class FakeProgressBar:
         def __init__(self) -> None:
@@ -366,7 +375,9 @@ async def test_embed_with_progress_updates_progress_bar() -> None:
     assert progress.updated == 5
 
 
-def test_emit_finalization_heartbeat_logs_expected_message(caplog: pytest.LogCaptureFixture) -> None:
+def test_emit_finalization_heartbeat_logs_expected_message(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """Heartbeat helper should emit the expected finalization log text."""
     caplog.set_level("INFO", logger="everspring_mcp.vector.indexer")
 

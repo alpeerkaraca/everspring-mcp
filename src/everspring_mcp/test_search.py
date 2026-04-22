@@ -17,8 +17,9 @@ async def search(query: str, n_results: int = 5):
     chroma = ChromaClient(config)
     embedder = Embedder(model_name=config.embedding_model)
 
-    vectors = await embedder.embed_texts([query])
-    results = chroma.query(query_embeddings=vectors, n_results=n_results)
+    embeddings = await embedder.embed_texts([query])
+    dense_vectors = [e["dense"] for e in embeddings]
+    results = chroma.query(query_embeddings=dense_vectors, n_results=n_results)
 
     for i, (doc, meta, dist) in enumerate(
         zip(results["documents"][0], results["metadatas"][0], results["distances"][0])

@@ -42,6 +42,7 @@ def default_model_for_tier(tier: str) -> str:
 
 
 Vector: TypeAlias = list[float]
+SparseVector: TypeAlias = dict[str, float]
 
 
 class EmbeddingStrategy(ABC):
@@ -52,8 +53,12 @@ class EmbeddingStrategy(ABC):
         self._model: SentenceTransformer | None = None
 
     @abstractmethod
-    async def embed(self, texts: list[str], batch_size: int) -> list[Vector]:
-        """Embed a list of texts."""
+    async def embed(self, texts: list[str], batch_size: int) -> list[dict[str, Any]]:
+        """Embed a list of texts.
+
+        Returns:
+            List of dicts with 'dense' (list[float]) and 'sparse' (dict[str, float] | None).
+        """
         pass
 
     @property
@@ -103,17 +108,27 @@ class BGEM3Strategy(EmbeddingStrategy):
     def tier_name(self) -> str:
         return MAIN_TIER
 
-    async def embed(self, texts: list[str], batch_size: int) -> list[Vector]:
+    async def embed(self, texts: list[str], batch_size: int) -> list[dict[str, Any]]:
         model = await asyncio.to_thread(self._ensure_loaded)
-        embeddings = await asyncio.to_thread(
+        # BGE-M3 supports dense and sparse (lexical) weights
+        output = await asyncio.to_thread(
             model.encode,
             texts,
             batch_size=batch_size,
+            return_dense=True,
+            return_sparse=True,
+            return_colbert_vecs=False,
             convert_to_numpy=True,
             show_progress_bar=False,
-            normalize_embeddings=True,
         )
-        return [emb.tolist() for emb in np.asarray(embeddings)]
+
+        dense_vecs = output["dense_vecs"]
+        lexical_weights = output["lexical_weights"]
+
+        return [
+            {"dense": d.tolist(), "sparse": s}
+            for d, s in zip(dense_vecs, lexical_weights, strict=True)
+        ]
 
 
 class BGESlimStrategy(EmbeddingStrategy):
@@ -123,7 +138,7 @@ class BGESlimStrategy(EmbeddingStrategy):
     def tier_name(self) -> str:
         return SLIM_TIER
 
-    async def embed(self, texts: list[str], batch_size: int) -> list[Vector]:
+    async def embed(self, texts: list[str], batch_size: int) -> list[dict[str, Any]]:
         model = await asyncio.to_thread(self._ensure_loaded)
         embeddings = await asyncio.to_thread(
             model.encode,
@@ -133,7 +148,9 @@ class BGESlimStrategy(EmbeddingStrategy):
             show_progress_bar=False,
             normalize_embeddings=True,
         )
-        return [emb.tolist() for emb in np.asarray(embeddings)]
+        return [
+            {"dense": emb.tolist(), "sparse": None} for emb in np.asarray(embeddings)
+        ]
 
 
 class BGEXSlimStrategy(EmbeddingStrategy):
@@ -143,7 +160,7 @@ class BGEXSlimStrategy(EmbeddingStrategy):
     def tier_name(self) -> str:
         return XSLIM_TIER
 
-    async def embed(self, texts: list[str], batch_size: int) -> list[Vector]:
+    async def embed(self, texts: list[str], batch_size: int) -> list[dict[str, Any]]:
         model = await asyncio.to_thread(self._ensure_loaded)
         embeddings = await asyncio.to_thread(
             model.encode,
@@ -153,7 +170,9 @@ class BGEXSlimStrategy(EmbeddingStrategy):
             show_progress_bar=False,
             normalize_embeddings=True,
         )
-        return [emb.tolist() for emb in np.asarray(embeddings)]
+        return [
+            {"dense": emb.tolist(), "sparse": None} for emb in np.asarray(embeddings)
+        ]
 
 
 class StrategyFactory:
@@ -199,15 +218,15 @@ class Embedder:
             self._strategy.model_name,
         )
 
-    async def embed_texts(self, texts: list[str]) -> list[Vector]:
+    async def embed_texts(self, texts: list[str]) -> list[dict[str, Any]]:
         """Embed a list of texts asynchronously."""
         if not texts:
             return []
         return await self._strategy.embed(texts, self.batch_size)
 
-    async def embed_batches(self, texts: list[str]) -> list[Vector]:
+    async def embed_batches(self, texts: list[str]) -> list[dict[str, Any]]:
         """Embed texts in batches."""
-        vectors: list[Vector] = []
+        vectors: list[dict[str, Any]] = []
         for i in range(0, len(texts), self.batch_size):
             batch = texts[i : i + self.batch_size]
             batch_vectors = await self.embed_texts(batch)
