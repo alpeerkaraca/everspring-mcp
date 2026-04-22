@@ -28,8 +28,10 @@ class ScrapeJob:
     submodule: str | None
     version: str
     content_type: str
-    entry_url: str
+    entry_url: str | None
     s3_prefix: str
+    github_repo: str | None = None
+    wiki_pages: list[str] | None = None
 
 
 @dataclass(frozen=True)
@@ -56,11 +58,14 @@ def build_jobs(
     csv_path: Path,
     include_reference: bool,
     include_api: bool,
+    include_github: bool,
     reference_prefix: str,
     api_prefix: str,
+    github_prefix: str,
 ) -> list[ScrapeJob]:
     reference_prefix = _normalize_prefix(reference_prefix)
     api_prefix = _normalize_prefix(api_prefix)
+    github_prefix = _normalize_prefix(github_prefix)
 
     jobs: list[ScrapeJob] = []
     with csv_path.open("r", encoding="utf-8", newline="") as fh:
@@ -71,6 +76,8 @@ def build_jobs(
             version = (row.get("version") or "").strip()
             reference_url = (row.get("reference_url") or "").strip()
             api_url = (row.get("api_url") or "").strip()
+            github_repo = (row.get("github_repo") or "").strip() or None
+            wiki_pages_str = (row.get("github_wiki_pages") or "").strip() or None
 
             if not module or not version:
                 continue
@@ -98,6 +105,21 @@ def build_jobs(
                         s3_prefix=api_prefix,
                     )
                 )
+                
+            if include_github and github_repo:
+                wiki_pages = [p.strip() for p in wiki_pages_str.split("|")] if wiki_pages_str else None
+                jobs.append(
+                    ScrapeJob(
+                        module=module,
+                        submodule=submodule,
+                        version=version,
+                        content_type="github-wiki",
+                        entry_url=None,
+                        s3_prefix=github_prefix,
+                        github_repo=github_repo,
+                        wiki_pages=wiki_pages,
+                    )
+                )
 
     return jobs
 
@@ -108,6 +130,26 @@ def build_command(
     scrape_concurrency: int,
     uv_bin: str,
 ) -> list[str]:
+    if job.content_type == "github-wiki":
+        owner, repo = job.github_repo.split("/", 1)
+        cmd = [
+            uv_bin,
+            "run",
+            "python",
+            "-m",
+            "everspring_mcp.main",
+            "ingest-github",
+            "--owner", owner,
+            "--repo", repo,
+            "--module", job.module,
+            "--version", job.version,
+            "--s3-prefix", job.s3_prefix,
+        ]
+        if job.wiki_pages and job.wiki_pages != ["AUTO"]:
+            cmd.append("--pages")
+            cmd.extend(job.wiki_pages)
+        return cmd
+
     cmd = [
         uv_bin,
         "run",
@@ -198,9 +240,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--include",
-        choices=["both", "reference", "api"],
-        default="both",
-        help="Which lanes to execute.",
+        choices=["all", "both", "reference", "api", "github"],
+        default="all",
+        help="Which lanes to execute. 'all' includes reference, api, and github.",
     )
     parser.add_argument(
         "--reference-prefix",
@@ -211,6 +253,11 @@ def parse_args() -> argparse.Namespace:
         "--api-prefix",
         default="spring-docs/raw-data",
         help="S3 prefix for API documentation lane.",
+    )
+    parser.add_argument(
+        "--github-prefix",
+        default="spring-docs/raw-data",
+        help="S3 prefix for GitHub ingestion lane.",
     )
     parser.add_argument(
         "--uv-bin",
@@ -236,17 +283,21 @@ def main() -> int:
     log_dir = repo_root / "logs" / "scrape-matrix"
     log_dir.mkdir(parents=True, exist_ok=True)
 
-    include_reference = args.include in ("both", "reference")
-    include_api = args.include in ("both", "api")
+    include_reference = args.include in ("all", "both", "reference")
+    include_api = args.include in ("all", "both", "api")
+    include_github = args.include in ("all", "github")
 
     try:
         jobs = build_jobs(
             csv_path=csv_path,
             include_reference=include_reference,
             include_api=include_api,
+            include_github=include_github,
             reference_prefix=args.reference_prefix,
             api_prefix=args.api_prefix,
+            github_prefix=args.github_prefix,
         )
+
     except ValueError as exc:
         logger.error("Invalid scrape matrix configuration: %s", exc)
         return 2

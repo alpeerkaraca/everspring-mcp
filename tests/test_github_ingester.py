@@ -1,74 +1,69 @@
-"""Tests for GitHubIngester."""
-
-from unittest.mock import AsyncMock, patch
+"""Tests for GitHubIngester - Local Processing Workflow."""
 
 import pytest
+from pathlib import Path
+from unittest.mock import MagicMock, patch
 
-from everspring_mcp.scraper.github_ingester import GitHubIngester
-from everspring_mcp.models.content import ContentType
+from everspring_mcp.scraper.github_ingester import GitHubIngester, GitHubIngestionConfig
+from everspring_mcp.models.spring import SpringModule
+
+
+@pytest.fixture
+def ingester():
+    return GitHubIngester()
+
+
+def test_find_latest_wiki_files(ingester, tmp_path):
+    # Create fake asciidoc files with versions
+    (tmp_path / "Spring-Boot-4.0-Release-Notes.asciidoc").write_text("v4.0")
+    (tmp_path / "Spring-Boot-4.1-Release-Notes.asciidoc").write_text("v4.1")
+    (tmp_path / "Spring-Boot-4.0-Migration-Guide.asciidoc").write_text("v4.0 migration")
+    (tmp_path / "Spring-Boot-4.0-Configuration-Changelog.asciidoc").write_text("v4.0 changelog")
+    (tmp_path / "Random-File.txt").write_text("random")
+
+    latest_files = ingester.find_latest_wiki_files(tmp_path)
+    
+    file_names = [f.name for f in latest_files]
+    assert len(file_names) == 3
+    assert "Spring-Boot-4.1-Release-Notes.asciidoc" in file_names
+    assert "Spring-Boot-4.0-Migration-Guide.asciidoc" in file_names
+    assert "Spring-Boot-4.0-Configuration-Changelog.asciidoc" in file_names
+    assert "Spring-Boot-4.0-Release-Notes.asciidoc" not in file_names
+
+
+@patch("subprocess.run")
+def test_clone_wiki(mock_run, ingester, tmp_path):
+    dest = tmp_path / "wiki"
+    ingester.clone_wiki("spring-projects", "spring-boot", dest)
+    
+    mock_run.assert_called_once()
+    args = mock_run.call_args[0][0]
+    assert "clone" in args
+    assert "https://github.com/spring-projects/spring-boot.wiki.git" in args
+
+
+@patch("subprocess.run")
+def test_convert_to_markdown(mock_run, ingester, tmp_path):
+    mock_run.return_value = MagicMock(stdout="# Converted Markdown", check=True)
+    adoc = tmp_path / "test.asciidoc"
+    adoc.write_text("= Test")
+    
+    md = ingester.convert_to_markdown(adoc)
+    assert md == "# Converted Markdown"
+    mock_run.assert_called_once()
 
 
 @pytest.mark.asyncio
-async def test_fetch_wiki_raw():
-    ingester = GitHubIngester()
-    owner, repo, page = "spring-projects", "spring-boot", "Spring-Boot-4.0-Release-Notes"
+@patch.object(GitHubIngester, "clone_wiki")
+@patch.object(GitHubIngester, "find_latest_wiki_files")
+@patch.object(GitHubIngester, "convert_to_markdown")
+async def test_ingest_wiki_orchestration(mock_convert, mock_find, mock_clone, ingester, tmp_path):
+    mock_find.return_value = [Path("Spring-Boot-4.1-Release-Notes.asciidoc")]
+    mock_convert.return_value = "## Converted Content"
     
-    mock_response = AsyncMock()
-    mock_response.text = "# Release Notes\n\nSome content."
-    mock_response.status_code = 200
-    mock_response.raise_for_status = AsyncMock()
-
-    with patch("httpx.AsyncClient.get", return_value=mock_response):
-        content = await ingester.fetch_wiki_raw(owner, repo, page)
-        assert content == "# Release Notes\n\nSome content."
-
-
-def test_clean_documentation_noise():
-    ingester = GitHubIngester()
-    dirty_md = """
-[[Sidebar Link]]
-# Title
-Content.
-## See also
-* [Link](http://example.com)
----
-Back to top
-"""
-    cleaned = ingester.clean_documentation_noise(dirty_md)
-    assert "[[Sidebar Link]]" not in cleaned
-    assert "See also" not in cleaned
-    assert "Back to top" not in cleaned
-    assert "# Title" in cleaned
-
-
-def test_tag_semantic_sections():
-    ingester = GitHubIngester()
-    md = """
-# Intro
-Some intro.
-## Section 1
-Content 1.
-## Section 2
-Content 2.
-"""
-    tagged = ingester.tag_semantic_sections(md, ContentType.RELEASE_NOTES, "4.0.0")
+    pages = await ingester.ingest_wiki("spring-projects", "spring-boot", SpringModule.BOOT)
     
-    assert "<release_notes version=\"4.0.0\">" in tagged
-    assert "</release_notes>" in tagged
-    assert "<section name=\"section_1\" title=\"Section 1\">" in tagged
-    assert "## Section 1" in tagged
-    assert "Content 1." in tagged
-
-
-def test_merge_documentation():
-    ingester = GitHubIngester()
-    base = "Base doc content"
-    extra = ["<release_notes>Extra 1</release_notes>", "<migration_guide>Extra 2</migration_guide>"]
-    
-    merged = ingester.merge_documentation(base, extra)
-    
-    assert "START OF REFERENCE" in merged
-    assert "Base doc content" in merged
-    assert "SUPPLEMENTAL CONTENT BLOCK 1" in merged
-    assert "Extra 1" in merged
-    assert "Extra 2" in merged
+    assert len(pages) == 1
+    assert pages[0].version.version_string == "4.1.0"
+    assert "Converted Content" in pages[0].markdown_content
+    mock_clone.assert_called_once()
