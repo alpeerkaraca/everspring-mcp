@@ -64,14 +64,18 @@ class GitHubIngester:
         """Clone a GitHub Wiki repository locally."""
         wiki_url = f"https://github.com/{owner}/{repo}.wiki.git"
         logger.info(f"Cloning wiki: {wiki_url} to {dest_dir}")
-        
+        env = os.environ.copy()
+        env["GIT_TERMINAL_PROMPT"] = "0"
+
         try:
             subprocess.run(
                 [self.config.git_command, "clone", "--depth", "1", wiki_url, str(dest_dir)],
                 check=True,
                 capture_output=True,
                 text=True,
-                timeout=self.config.timeout_seconds
+                timeout=self.config.timeout_seconds,
+                stdin=subprocess.DEVNULL,
+                env=env,
             )
         except subprocess.CalledProcessError as e:
             logger.error(f"Failed to clone wiki {wiki_url}: {e.stderr}")
