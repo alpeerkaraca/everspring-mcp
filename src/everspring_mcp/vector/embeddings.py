@@ -79,12 +79,20 @@ class EmbeddingStrategy(ABC):
 
             device, dtype = self._resolve_device_and_dtype()
             logger.info("Loading %s model: %s", self.tier_name, self.model_name)
-            self._model = SentenceTransformer(
-                self.model_name,
-                device=device,
-                model_kwargs={"dtype": dtype},
-                processor_kwargs={"use_fast": True},
-            )
+            try:
+                self._model = SentenceTransformer(
+                    self.model_name,
+                    device=device,
+                    model_kwargs={"dtype": dtype},
+                    processor_kwargs={"use_fast": True},
+                )
+            except TypeError:
+                self._model = SentenceTransformer(
+                    self.model_name,
+                    device=device,
+                    model_kwargs={"dtype": dtype},
+                    tokenizer_kwargs={"use_fast": True},
+                )
         return self._model
 
 
