@@ -76,3 +76,4 @@ logs/
 report.md
 a.ps1
 infrastructure/ecs-fargate/.terraform.lock.hcl
+.gemini/agents/
