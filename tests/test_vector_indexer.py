@@ -107,12 +107,12 @@ async def test_prefetch_model_loads_once(monkeypatch: pytest.MonkeyPatch) -> Non
             model_name: str,
             device: str | None = None,
             model_kwargs: dict[str, object] | None = None,
-            tokenizer_kwargs: dict[str, object] | None = None,
+            processor_kwargs: dict[str, object] | None = None,
         ) -> None:
             del model_name
             assert device == "cuda"
             assert model_kwargs is not None
-            assert tokenizer_kwargs == {"use_fast": True}
+            assert processor_kwargs == {"use_fast": True}
             nonlocal load_calls
             load_calls += 1
 

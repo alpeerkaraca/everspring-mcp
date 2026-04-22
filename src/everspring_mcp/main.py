@@ -24,6 +24,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+from everspring_mcp.mcp.prompt import PromptBuilder
 from everspring_mcp.models.content import ContentType
 from everspring_mcp.models.spring import SpringModule, SpringVersion
 from everspring_mcp.scraper.pipeline import PipelineConfig, ScraperPipeline
@@ -172,7 +173,9 @@ def _parse_positive_int(value: str) -> int:
     try:
         parsed = int(value)
     except ValueError as exc:
-        raise argparse.ArgumentTypeError(f"Expected integer value, got: {value}") from exc
+        raise argparse.ArgumentTypeError(
+            f"Expected integer value, got: {value}"
+        ) from exc
     if parsed <= 0:
         raise argparse.ArgumentTypeError(
             f"Expected a value greater than 0, got: {value}"
@@ -570,6 +573,11 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=["main", "slim", "xslim"],
         default="main",
         help="Embedding tier",
+    )
+    search.add_argument(
+        "--prompt",
+        action="store_true",
+        help="Output final LLM-formatted prompt context (Markdown)",
     )
     search.add_argument("--json", action="store_true", help="Output JSON results")
 
@@ -1309,7 +1317,11 @@ async def _run_serve(args: argparse.Namespace) -> int:
         logger.info("Starting everspring-mcp MCP server...")
 
     if args.transport == "stdio":
-        if args.workers is not None or args.backlog is not None or args.threads is not None:
+        if (
+            args.workers is not None
+            or args.backlog is not None
+            or args.threads is not None
+        ):
             raise SystemExit(
                 "--workers/--backlog/--threads can only be used with --transport http"
             )
@@ -1464,6 +1476,16 @@ async def _run_search(args: argparse.Namespace) -> int:
                 "After sync completes, rerun the search command."
             ) from exc
         raise
+
+    if getattr(args, "prompt", False):
+        builder = (
+            PromptBuilder()
+            .add_user_query(args.query)
+            .add_filters(module=args.module, version=args.version)
+            .add_retrieved_context(results)
+        )
+        console.print(builder.build())
+        return 0
 
     if args.json:
         output = [

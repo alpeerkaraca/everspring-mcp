@@ -1,11 +1,11 @@
-"""EverSpring MCP - Embedding generation utilities."""
+"""EverSpring MCP - Embedding generation utilities using Strategy and Factory patterns."""
 
 from __future__ import annotations
 
 import asyncio
-import time
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, TypeAlias
 
 import numpy as np
 
@@ -34,36 +34,147 @@ TIER_DEFAULT_MODELS: dict[str, str] = {
 
 
 def default_model_for_tier(tier: str) -> str:
+    """Resolve the default model name for a given tier."""
     normalized = tier.strip().lower()
     if normalized not in TIER_DEFAULT_MODELS:
         raise ValueError(f"Unsupported embedding tier '{tier}'")
     return TIER_DEFAULT_MODELS[normalized]
 
 
-class _EmbeddingBackend(Protocol):
-    tokenizer: Any | None
-    max_seq_length: int | None
-    raw_model: SentenceTransformer
-
-    def embed(self, texts: list[str], batch_size: int) -> np.ndarray: ...
+Vector: TypeAlias = list[float]
 
 
-class _SentenceTransformerBackend:
-    def __init__(self, model: SentenceTransformer) -> None:
-        self.raw_model = model
-        self.tokenizer: Any | None = getattr(model, "tokenizer", None)
-        max_seq = getattr(model, "max_seq_length", None)
-        self.max_seq_length: int | None = max_seq if isinstance(max_seq, int) else None
+class EmbeddingStrategy(ABC):
+    """Abstract base class for embedding strategies."""
 
-    def embed(self, texts: list[str], batch_size: int) -> np.ndarray:
-        vectors = self.raw_model.encode(
+    def __init__(self, model_name: str) -> None:
+        self.model_name = model_name
+        self._model: SentenceTransformer | None = None
+
+    @abstractmethod
+    async def embed(self, texts: list[str], batch_size: int) -> list[Vector]:
+        """Embed a list of texts."""
+        pass
+
+    @property
+    @abstractmethod
+    def tier_name(self) -> str:
+        """The name of the tier this strategy represents."""
+        pass
+
+    def _resolve_device_and_dtype(self) -> tuple[str, Any]:
+        import torch
+
+        if torch.backends.mps.is_available():
+            return "mps", torch.float32
+        if torch.cuda.is_available():
+            if torch.cuda.is_bf16_supported():
+                return "cuda", torch.bfloat16
+            return "cuda", torch.float16
+        return "cpu", torch.float32
+
+    def _ensure_loaded(self) -> SentenceTransformer:
+        if self._model is None:
+            from sentence_transformers import SentenceTransformer
+
+            device, dtype = self._resolve_device_and_dtype()
+            logger.info("Loading %s model: %s", self.tier_name, self.model_name)
+            try:
+                self._model = SentenceTransformer(
+                    self.model_name,
+                    device=device,
+                    model_kwargs={"dtype": dtype},
+                    processor_kwargs={"use_fast": True},
+                )
+            except TypeError:
+                self._model = SentenceTransformer(
+                    self.model_name,
+                    device=device,
+                    model_kwargs={"dtype": dtype},
+                    tokenizer_kwargs={"use_fast": True},
+                )
+        return self._model
+
+
+class BGEM3Strategy(EmbeddingStrategy):
+    """Concrete strategy for the BGE-M3 (Main) model."""
+
+    @property
+    def tier_name(self) -> str:
+        return MAIN_TIER
+
+    async def embed(self, texts: list[str], batch_size: int) -> list[Vector]:
+        model = await asyncio.to_thread(self._ensure_loaded)
+        embeddings = await asyncio.to_thread(
+            model.encode,
             texts,
             batch_size=batch_size,
             convert_to_numpy=True,
             show_progress_bar=False,
             normalize_embeddings=True,
         )
-        return np.asarray(vectors)
+        return [emb.tolist() for emb in np.asarray(embeddings)]
+
+
+class BGESlimStrategy(EmbeddingStrategy):
+    """Concrete strategy for the BGE-Base (Slim) model."""
+
+    @property
+    def tier_name(self) -> str:
+        return SLIM_TIER
+
+    async def embed(self, texts: list[str], batch_size: int) -> list[Vector]:
+        model = await asyncio.to_thread(self._ensure_loaded)
+        embeddings = await asyncio.to_thread(
+            model.encode,
+            texts,
+            batch_size=batch_size,
+            convert_to_numpy=True,
+            show_progress_bar=False,
+            normalize_embeddings=True,
+        )
+        return [emb.tolist() for emb in np.asarray(embeddings)]
+
+
+class BGEXSlimStrategy(EmbeddingStrategy):
+    """Concrete strategy for the BGE-Small (X-Slim) model."""
+
+    @property
+    def tier_name(self) -> str:
+        return XSLIM_TIER
+
+    async def embed(self, texts: list[str], batch_size: int) -> list[Vector]:
+        model = await asyncio.to_thread(self._ensure_loaded)
+        embeddings = await asyncio.to_thread(
+            model.encode,
+            texts,
+            batch_size=batch_size,
+            convert_to_numpy=True,
+            show_progress_bar=False,
+            normalize_embeddings=True,
+        )
+        return [emb.tolist() for emb in np.asarray(embeddings)]
+
+
+class StrategyFactory:
+    """Factory for creating embedding strategies based on tier."""
+
+    @staticmethod
+    def create(tier: str, model_name: str | None = None) -> EmbeddingStrategy:
+        normalized_tier = tier.strip().lower()
+        resolved_model = model_name or TIER_DEFAULT_MODELS.get(normalized_tier)
+
+        if not resolved_model:
+            raise ValueError(f"Unsupported embedding tier: {tier}")
+
+        if normalized_tier == MAIN_TIER:
+            return BGEM3Strategy(resolved_model)
+        elif normalized_tier == SLIM_TIER:
+            return BGESlimStrategy(resolved_model)
+        elif normalized_tier == XSLIM_TIER:
+            return BGEXSlimStrategy(resolved_model)
+        else:
+            raise ValueError(f"Unknown tier: {tier}")
 
 
 @dataclass(frozen=True)
@@ -71,176 +182,51 @@ class EmbeddingResult:
     """Embedding result for a chunk."""
 
     chunk_id: str
-    vector: list[float]
+    vector: Vector
 
 
 class Embedder:
-    """Embedding generator for markdown chunks with tiered BGE backends."""
+    """Embedding generator delegating to specific strategies."""
 
-    def __init__(self, model_name: str, batch_size: int = 128, tier: str = MAIN_TIER) -> None:
-        start = time.perf_counter()
-        normalized_tier = tier.strip().lower()
-        if normalized_tier not in VALID_EMBEDDING_TIERS:
-            raise ValueError(
-                f"Unsupported embedding tier '{tier}'. Valid values: {sorted(VALID_EMBEDDING_TIERS)}"
-            )
-
-        self.model_name = model_name
+    def __init__(
+        self, model_name: str, batch_size: int = 128, tier: str = MAIN_TIER
+    ) -> None:
         self.batch_size = batch_size
-        self.tier = normalized_tier
-        self._model: _EmbeddingBackend | None = None
+        self._strategy = StrategyFactory.create(tier, model_name)
         logger.info(
-            "Embedder initialized (tier=%s, model=%s) in %.3fs",
-            self.tier,
-            self._resolved_model_name(),
-            time.perf_counter() - start,
+            "Embedder initialized with %s strategy (model=%s)",
+            self._strategy.__class__.__name__,
+            self._strategy.model_name,
         )
 
-    @staticmethod
-    def _resolve_device_and_dtype() -> tuple[str, Any]:
-        import torch
-
-        # 1. Apple Silicon (M1/M2/M3)
-        if torch.backends.mps.is_available():
-            logger.info("Apple Silicon (MPS) detected, using float32 (MPS best practice)")
-            return "mps", torch.float32
-
-        # 2. CUDA (NVIDIA & AMD ROCm)
-        if torch.cuda.is_available():
-            # check bfloat16
-            if torch.cuda.is_bf16_supported():
-                logger.info("CUDA bfloat16 support detected, using bfloat16")
-                return "cuda", torch.bfloat16
-
-            # if not standart fp16
-            logger.info("CUDA detected but bfloat16 not supported, falling back to float16")
-            return "cuda", torch.float16
-
-        # 3. CPU
-        logger.info("No GPU acceleration found, falling back to CPU (float32)")
-        return "cpu", torch.float32
-
-    def _resolved_model_name(self) -> str:
-        if self.model_name == DEFAULT_MAIN_MODEL:
-            return default_model_for_tier(self.tier)
-        return self.model_name
-
-    def _load_sentence_transformer_backend(self) -> _SentenceTransformerBackend:
-        import_start = time.perf_counter()
-        from sentence_transformers import SentenceTransformer
-
-        logger.info(
-            "sentence_transformers imported in %.2fs",
-            time.perf_counter() - import_start,
-        )
-
-        device, dtype = self._resolve_device_and_dtype()
-        model_name = self._resolved_model_name()
-        start = time.perf_counter()
-        logger.info("Loading embedding model (%s): %s", self.tier, model_name)
-        model = SentenceTransformer(
-            model_name,
-            device=device,
-            model_kwargs={"dtype": dtype},
-            tokenizer_kwargs={"use_fast": True},
-        )
-        logger.info("Embedding model loaded in %.2fs", time.perf_counter() - start)
-        return _SentenceTransformerBackend(model)
-
-    def _get_model(self) -> _EmbeddingBackend:
-        if self._model is None:
-            self._model = self._load_sentence_transformer_backend()
-        return self._model
-
-    def ensure_model_loaded(self) -> _EmbeddingBackend:
-        """Ensure embedding model is loaded and return backend wrapper."""
-        return self._get_model()
-
-    async def prefetch_model(self) -> None:
-        """Preload embedding model so artifacts are cached before first query."""
-        await asyncio.to_thread(self.ensure_model_loaded)
-
-    @staticmethod
-    def _resolve_max_seq_length(model: _EmbeddingBackend) -> int | None:
-        max_seq = model.max_seq_length
-        if isinstance(max_seq, int) and max_seq > 0:
-            return max_seq
-
-        tokenizer: Any = model.tokenizer
-        tokenizer_limit = getattr(tokenizer, "model_max_length", None)
-        if isinstance(tokenizer_limit, int) and 0 < tokenizer_limit < 1_000_000:
-            return tokenizer_limit
-
-        return None
-
-    def _prepare_texts(self, model: _EmbeddingBackend, texts: list[str]) -> list[str]:
-        max_seq_length = self._resolve_max_seq_length(model)
-        tokenizer: Any = model.tokenizer
-        if max_seq_length is None or tokenizer is None:
-            return texts
-
-        prepared: list[str] = []
-        for idx, text in enumerate(texts):
-            token_ids = tokenizer.encode(
-                text,
-                add_special_tokens=False,
-                verbose=False,
-            )
-            token_count = len(token_ids)
-            if token_count <= max_seq_length:
-                prepared.append(text)
-                continue
-
-            truncated_tokens = token_ids[:max_seq_length]
-            truncated = tokenizer.decode(
-                truncated_tokens,
-                skip_special_tokens=True,
-            )
-            if not truncated:
-                truncated = tokenizer.decode(
-                    truncated_tokens,
-                    skip_special_tokens=False,
-                )
-            logger.debug(
-                "Truncated embedding input at index %d from %d to %d tokens",
-                idx,
-                token_count,
-                max_seq_length,
-            )
-            prepared.append(truncated)
-
-        return prepared
-
-    async def embed_texts(self, texts: list[str]) -> list[list[float]]:
+    async def embed_texts(self, texts: list[str]) -> list[Vector]:
         """Embed a list of texts asynchronously."""
         if not texts:
             return []
+        return await self._strategy.embed(texts, self.batch_size)
 
-        model = self.ensure_model_loaded()
-        prepared_texts = self._prepare_texts(model, texts)
-        embeddings_np = await asyncio.to_thread(
-            model.embed,
-            prepared_texts,
-            self.batch_size,
-        )
-        return [emb.tolist() for emb in embeddings_np]
-
-    async def embed_batches(self, texts: list[str]) -> list[list[float]]:
+    async def embed_batches(self, texts: list[str]) -> list[Vector]:
         """Embed texts in batches."""
-        vectors: list[list[float]] = []
+        vectors: list[Vector] = []
         for i in range(0, len(texts), self.batch_size):
             batch = texts[i : i + self.batch_size]
             batch_vectors = await self.embed_texts(batch)
             vectors.extend(batch_vectors)
         return vectors
 
+    async def prefetch_model(self) -> None:
+        """Preload the strategy's model."""
+        await asyncio.to_thread(self._strategy._ensure_loaded)
+
 
 __all__ = [
+    "EmbeddingStrategy",
+    "BGEM3Strategy",
+    "BGESlimStrategy",
+    "BGEXSlimStrategy",
+    "StrategyFactory",
     "EmbeddingResult",
     "Embedder",
-    "DEFAULT_MAIN_MODEL",
-    "DEFAULT_SLIM_MODEL",
-    "DEFAULT_XSLIM_MODEL",
     "MAIN_TIER",
     "SLIM_TIER",
     "XSLIM_TIER",
