@@ -22,8 +22,8 @@ from everspring_mcp.mcp.models import (
     SearchStatus,
     StructuredErrorResponse,
 )
+from everspring_mcp.mcp.prompt import PromptBuilder
 from everspring_mcp.mcp.tools import SpringDocsTool
-from everspring_mcp.models.metadata import SearchResult
 from everspring_mcp.utils.logging import get_logger
 from everspring_mcp.vector.config import VectorConfig
 from everspring_mcp.vector.retriever import HybridRetriever
@@ -228,54 +228,6 @@ class MCPServer:
             return await self._execute_search_tool(params)
 
     @staticmethod
-    def _format_results_markdown(
-        params: SearchToolArgs,
-        results: list[SearchResult],
-    ) -> str:
-        """Format search results for MCP clients as Markdown."""
-        lines: list[str] = [
-            "## Spring Docs Search Results",
-            "",
-            f"**Query:** {params.query}",
-        ]
-
-        filters: list[str] = []
-        if params.module:
-            filters.append(f"module={params.module}")
-        if params.version_major is not None:
-            filters.append(f"version_major={params.version_major}")
-        if filters:
-            lines.append(f"**Filters:** {', '.join(filters)}")
-
-        lines.append("")
-        if not results:
-            lines.append("No relevant documentation chunks found.")
-            return "\n".join(lines)
-
-        for index, result in enumerate(results, start=1):
-            version = f"v{result.version_major}.{result.version_minor}"
-            module = (
-                f"{result.module}/{result.submodule}"
-                if result.submodule
-                else result.module
-            )
-            section = result.section_path.strip() or result.title
-            lines.extend(
-                [
-                    f"### {index}. {result.title}",
-                    f"- **URL:** {result.url}",
-                    f"- **Module:** {module}",
-                    f"- **Version:** {version}",
-                    f"- **Score:** {result.score:.4f}",
-                    f"- **Section:** {section}",
-                    "",
-                    result.content.strip(),
-                    "",
-                ]
-            )
-        return "\n".join(lines).strip()
-
-    @staticmethod
     def _format_runtime_error(error: Exception) -> StructuredErrorResponse:
         return StructuredErrorResponse(
             error_type="runtime_unavailable",
@@ -327,6 +279,35 @@ class MCPServer:
             )
 
         try:
+            # Validate module if provided
+            status = await self._tool.get_status()
+            available_modules = [module.name for module in status.modules]
+            if (
+                params.module
+                and available_modules
+                and params.module not in available_modules
+            ):
+                return self._error_result(
+                    StructuredErrorResponse(
+                        error_type="invalid_module",
+                        message=(
+                            f"Module '{params.module}' is not available in the current index."
+                        ),
+                        resolution_hints=[
+                            "Use one of the available modules from context.available_modules.",
+                            "Run sync/index to refresh local data if the module should exist.",
+                            "Retry without module filter to inspect broader results.",
+                        ],
+                        context={
+                            "requested_module": params.module,
+                            "available_modules": available_modules,
+                            "available_versions_by_module": {
+                                m.name: m.versions for m in status.modules
+                            },
+                        },
+                    )
+                )
+
             search_params = SearchParameters(
                 query=params.query,
                 top_k=params.top_k,
@@ -352,18 +333,17 @@ class MCPServer:
                         },
                     )
                 )
-            lines = [
-                "## Spring Docs Search Results",
-                f"**Status:** {response.message}",
-                "",
-            ]
 
-            for res in response.results:
-                lines.append(res.content)
-                lines.append("")
+            builder = (
+                PromptBuilder()
+                .add_system_prompt(f"Status: {response.message}")
+                .add_user_query(params.query)
+                .add_filters(module=params.module, version=params.version_major)
+                .add_retrieved_context(response.results)
+            )
 
             return types.CallToolResult(
-                content=[types.TextContent(type="text", text="\n".join(lines))],
+                content=[types.TextContent(type="text", text=builder.build())],
                 isError=False,
             )
         except Exception as exc:
