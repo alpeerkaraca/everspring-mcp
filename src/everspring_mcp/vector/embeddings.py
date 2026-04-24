@@ -132,7 +132,7 @@ class BGEM3Strategy(EmbeddingStrategy):
 
 
 class DenseEmbeddingStrategy(EmbeddingStrategy):
-    """Base strategy for models that only return dense embeddings."""
+    """Base strategy for models that produce only dense embeddings."""
 
     async def embed(self, texts: list[str], batch_size: int) -> list[dict[str, Any]]:
         model = await asyncio.to_thread(self._ensure_loaded)

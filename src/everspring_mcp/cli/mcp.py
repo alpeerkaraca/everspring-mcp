@@ -7,10 +7,8 @@ import os
 from typing import Any
 
 from everspring_mcp.vector.config import VectorConfig
-from everspring_mcp.vector.embeddings import default_model_for_tier
 from everspring_mcp.cli.utils import (
-    _tier_chroma_dir,
-    _auto_refresh_runtime_snapshots,
+    resolve_vector_config,
     _parse_positive_int,
 )
 
@@ -25,21 +23,7 @@ async def _run_serve(args: argparse.Namespace) -> int:
         if option_value is not None and option_value <= 0:
             raise SystemExit(f"--{option_name} must be greater than 0")
 
-    config = VectorConfig.from_env()
-    selected_tier = getattr(args, "tier", "main")
-    resolved_model = default_model_for_tier(selected_tier)
-    updates: dict[str, Any] = {
-        "embedding_tier": selected_tier,
-        "embedding_model": resolved_model,
-    }
-    if not os.environ.get(VectorConfig.ENV_CHROMA_DIR):
-        updates["chroma_dir"] = _tier_chroma_dir(selected_tier, resolved_model)
-    config = config.model_copy(update=updates)
-    await _auto_refresh_runtime_snapshots(
-        model_name=config.embedding_model,
-        tier=config.embedding_tier,
-        data_dir=config.data_dir,
-    )
+    config = await resolve_vector_config(args)
     if args.json:
         status_info = {
             "status": "starting",
@@ -85,10 +69,10 @@ async def _run_serve(args: argparse.Namespace) -> int:
     return 0
 
 async def _run_client(args: argparse.Namespace) -> int:
-    from everspring_mcp.mcp.terminal_search import LocalSearchCLI
+    from everspring_mcp.mcp.client import MCPClient
 
     show_progress = not getattr(args, "no_progress", False)
-    client = LocalSearchCLI(show_progress=show_progress)
+    client = MCPClient(show_progress=show_progress)
 
     logger.info("EverSpring MCP - Spring Documentation Search")
     logger.info("=" * 50)

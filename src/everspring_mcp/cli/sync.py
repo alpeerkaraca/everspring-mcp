@@ -22,37 +22,10 @@ from everspring_mcp.cli.utils import (
 
 logger = logging.getLogger("everspring_mcp")
 
-def _load_sync_targets_from_matrix(
-    matrix_path: Path,
-) -> list[tuple[str, str, str | None]]:
-    if not matrix_path.exists():
-        raise SystemExit(f"CSV not found: {matrix_path}")
-
-    import csv
-
-    targets: list[tuple[str, str, str | None]] = []
-    seen: set[tuple[str, str, str | None]] = set()
-    with matrix_path.open("r", encoding="utf-8", newline="") as fh:
-        reader = csv.DictReader(fh)
-        for row in reader:
-            module = (row.get("module") or "").strip()
-            version = (row.get("version") or "").strip()
-            submodule = (row.get("submodule") or "").strip() or None
-            if not module or not version:
-                continue
-            key = (module, version, submodule)
-            if key in seen:
-                continue
-            seen.add(key)
-            targets.append(key)
-    return targets
-
 async def _run_manifest_sync(args: argparse.Namespace, config: SyncConfig) -> int:
     async with SyncOrchestrator(config) as orchestrator:
         if args.all:
-            targets = _load_sync_targets_from_matrix(
-                Path("config") / "module_submodule_urls.csv"
-            )
+            targets = await orchestrator.s3.discover_all_targets()
             results = []
             for module, version, submodule in targets:
                 res = await orchestrator.sync_module(
@@ -127,9 +100,7 @@ async def _run_manifest_prime(args: argparse.Namespace, config: SyncConfig) -> i
     parallel_jobs = config.parallel_jobs
 
     if args.all:
-        targets = _load_sync_targets_from_matrix(
-            Path("config") / "module_submodule_urls.csv"
-        )
+        targets = await s3_service.discover_all_targets()
     else:
         targets = [(args.module, args.version, args.submodule)]
 
@@ -387,12 +358,9 @@ async def _run_status(args: argparse.Namespace) -> int:
 
     async with SyncOrchestrator(config) as orchestrator:
         if args.all:
-            targets = await orchestrator.list_manifest_targets()
+            targets = await orchestrator.s3.discover_all_targets()
             statuses = []
-            for target in targets:
-                module = target["module"]
-                version = target["version"]
-                submodule = target["submodule"]
+            for module, version, submodule in targets:
                 status = await orchestrator.get_sync_status(
                     module=module,  # type: ignore[arg-type]
                     version=version,  # type: ignore[arg-type]
@@ -434,8 +402,8 @@ def add_subparser(subparsers: argparse._SubParsersAction) -> None:
         "--all",
         action="store_true",
         help=(
-            "For manifest modes: sync all discovered module/submodule/version targets from "
-            "config\\module_submodule_urls.csv. For snapshot-upload: upload snapshots for all "
+            "For manifest modes: discover and sync all module/submodule/version targets directly from "
+            "S3 raw-data storage. For snapshot-upload: upload snapshots for all "
             "default embedding tiers."
         ),
     )
@@ -500,7 +468,7 @@ def add_subparser(subparsers: argparse._SubParsersAction) -> None:
     status.add_argument(
         "--all",
         action="store_true",
-        help="Show status for all module/submodule/version entries in local manifest cache",
+        help="Show status for all module/submodule/version targets discovered directly from S3 raw-data storage",
     )
     status.add_argument(
         "--data-dir", default=None, help="Local data directory override"

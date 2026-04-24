@@ -247,3 +247,38 @@ async def _auto_refresh_runtime_snapshots(
         namespace,
     )
     _restart_current_process()
+
+async def resolve_vector_config(args: argparse.Namespace) -> VectorConfig:
+    from everspring_mcp.vector.embeddings import default_model_for_tier
+
+    config = VectorConfig.from_env()
+    updates: dict[str, Any] = {}
+
+    if getattr(args, "data_dir", None):
+        updates["data_dir"] = Path(args.data_dir)
+    if getattr(args, "db_filename", None):
+        updates["db_filename"] = args.db_filename
+    if getattr(args, "docs_subdir", None):
+        updates["docs_subdir"] = args.docs_subdir
+    if getattr(args, "chroma_dir", None):
+        updates["chroma_dir"] = Path(args.chroma_dir)
+    if getattr(args, "collection", None):
+        updates["collection_name"] = args.collection
+
+    selected_tier = getattr(args, "tier", "main")
+    updates["embedding_tier"] = selected_tier
+    resolved_model = getattr(args, "embed_model", None) or default_model_for_tier(selected_tier)
+    updates["embedding_model"] = resolved_model
+
+    if not updates.get("chroma_dir") and not os.environ.get(VectorConfig.ENV_CHROMA_DIR):
+        updates["chroma_dir"] = _tier_chroma_dir(selected_tier, resolved_model)
+
+    if updates:
+        config = config.model_copy(update=updates)
+
+    await _auto_refresh_runtime_snapshots(
+        model_name=config.embedding_model,
+        tier=config.embedding_tier,
+        data_dir=config.data_dir,
+    )
+    return config

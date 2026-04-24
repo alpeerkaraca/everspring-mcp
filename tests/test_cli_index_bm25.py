@@ -27,7 +27,7 @@ def disable_auto_snapshot_refresh(monkeypatch: pytest.MonkeyPatch) -> None:
     async def _noop_refresh(*, model_name: str, tier: str, data_dir: Path) -> None:
         del model_name, tier, data_dir
 
-    monkeypatch.setattr(index_cli, "_auto_refresh_runtime_snapshots", _noop_refresh)
+    monkeypatch.setattr(cli_utils, "_auto_refresh_runtime_snapshots", _noop_refresh)
 
 
 def test_index_parser_accepts_build_bm25_flag() -> None:

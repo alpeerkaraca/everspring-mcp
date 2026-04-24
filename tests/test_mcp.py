@@ -15,7 +15,7 @@ from everspring_mcp.mcp.models import (
     StatusResponse,
 )
 from everspring_mcp.mcp.server import create_server
-from everspring_mcp.mcp.terminal_search import LocalSearchCLI
+from everspring_mcp.mcp.client import MCPClient
 from everspring_mcp.mcp.tools import SpringDocsTool
 from everspring_mcp.models.metadata import SearchResult
 
@@ -425,7 +425,7 @@ class TestMCPClient:
     @pytest.mark.asyncio
     async def test_format_results(self):
         """Format results for display."""
-        client = LocalSearchCLI(show_progress=False)
+        client = MCPClient(show_progress=False)
 
         response = SearchResponse(
             status=SearchStatus.SUCCESS,
@@ -459,7 +459,7 @@ class TestMCPClient:
     @pytest.mark.asyncio
     async def test_format_status(self):
         """Format status for display."""
-        client = LocalSearchCLI(show_progress=False)
+        client = MCPClient(show_progress=False)
 
         status = StatusResponse(
             healthy=True,
@@ -483,7 +483,7 @@ class TestMCPIntegration:
     @pytest.mark.skip(reason="Requires ChromaDB with indexed data")
     async def test_end_to_end_search(self):
         """Full search flow from client to tool."""
-        client = LocalSearchCLI(show_progress=False)
+        client = MCPClient(show_progress=False)
         await client.initialize()
 
         response = await client.search(
@@ -493,3 +493,4 @@ class TestMCPIntegration:
         )
 
         assert response.status in (SearchStatus.SUCCESS, SearchStatus.NO_RESULTS)
+
