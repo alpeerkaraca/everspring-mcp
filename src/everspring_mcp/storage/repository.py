@@ -180,6 +180,27 @@ class DocumentRepository:
         """
         self.db = db
 
+    def _to_row_tuple(self, doc: DocumentRecord) -> tuple[Any, ...]:
+        """Convert a DocumentRecord to a tuple for sqlite insertion."""
+        return (
+            doc.id,
+            doc.url,
+            doc.title,
+            doc.module,
+            doc.submodule,
+            doc.major_version,
+            doc.minor_version,
+            doc.patch_version,
+            doc.content_hash,
+            doc.file_path,
+            doc.s3_key,
+            doc.size_bytes,
+            doc.scraped_at.isoformat(),
+            doc.synced_at.isoformat() if doc.synced_at else None,
+            doc.schema_version,
+            int(doc.is_indexed),
+        )
+
     async def insert(self, doc: DocumentRecord) -> None:
         """Insert a new document.
 
@@ -197,24 +218,7 @@ class DocumentRepository:
                 schema_version, is_indexed
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (
-                doc.id,
-                doc.url,
-                doc.title,
-                doc.module,
-                doc.submodule,
-                doc.major_version,
-                doc.minor_version,
-                doc.patch_version,
-                doc.content_hash,
-                doc.file_path,
-                doc.s3_key,
-                doc.size_bytes,
-                doc.scraped_at.isoformat(),
-                doc.synced_at.isoformat() if doc.synced_at else None,
-                doc.schema_version,
-                int(doc.is_indexed),
-            ),
+            self._to_row_tuple(doc),
         )
         await self.db.commit()
         logger.debug("Inserted document: %s", doc.id)
@@ -246,24 +250,7 @@ class DocumentRepository:
                     ELSE documents.is_indexed 
                 END
             """,
-            (
-                doc.id,
-                doc.url,
-                doc.title,
-                doc.module,
-                doc.submodule,
-                doc.major_version,
-                doc.minor_version,
-                doc.patch_version,
-                doc.content_hash,
-                doc.file_path,
-                doc.s3_key,
-                doc.size_bytes,
-                doc.scraped_at.isoformat(),
-                doc.synced_at.isoformat() if doc.synced_at else None,
-                doc.schema_version,
-                int(doc.is_indexed),
-            ),
+            self._to_row_tuple(doc),
         )
         await self.db.commit()
         logger.debug("Upserted document: %s", doc.id)

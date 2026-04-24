@@ -190,6 +190,7 @@ async def test_flush_vector_payloads_batches_and_marks_document_once() -> None:
             content="c1",
             metadata={"module": "spring-boot"},
             embedding=[0.1, 0.2],
+            sparse_weights=None,
         ),
         types.SimpleNamespace(
             chunk_id="doc1-1",
@@ -197,9 +198,9 @@ async def test_flush_vector_payloads_batches_and_marks_document_once() -> None:
             content="c2",
             metadata={"module": "spring-boot"},
             embedding=[0.3, 0.4],
+            sparse_weights=None,
         ),
     ]
-
     flushed_chunks, flushed_docs = await VectorIndexer._flush_vector_payloads(
         indexer,
         payloads=payloads,

@@ -131,48 +131,38 @@ class BGEM3Strategy(EmbeddingStrategy):
         ]
 
 
-class BGESlimStrategy(EmbeddingStrategy):
+class DenseEmbeddingStrategy(EmbeddingStrategy):
+    """Base strategy for models that only return dense embeddings."""
+
+    async def embed(self, texts: list[str], batch_size: int) -> list[dict[str, Any]]:
+        model = await asyncio.to_thread(self._ensure_loaded)
+        embeddings = await asyncio.to_thread(
+            model.encode,
+            texts,
+            batch_size=batch_size,
+            convert_to_numpy=True,
+            show_progress_bar=False,
+            normalize_embeddings=True,
+        )
+        return [
+            {"dense": emb.tolist(), "sparse": None} for emb in np.asarray(embeddings)
+        ]
+
+
+class BGESlimStrategy(DenseEmbeddingStrategy):
     """Concrete strategy for the BGE-Base (Slim) model."""
 
     @property
     def tier_name(self) -> str:
         return SLIM_TIER
 
-    async def embed(self, texts: list[str], batch_size: int) -> list[dict[str, Any]]:
-        model = await asyncio.to_thread(self._ensure_loaded)
-        embeddings = await asyncio.to_thread(
-            model.encode,
-            texts,
-            batch_size=batch_size,
-            convert_to_numpy=True,
-            show_progress_bar=False,
-            normalize_embeddings=True,
-        )
-        return [
-            {"dense": emb.tolist(), "sparse": None} for emb in np.asarray(embeddings)
-        ]
 
-
-class BGEXSlimStrategy(EmbeddingStrategy):
+class BGEXSlimStrategy(DenseEmbeddingStrategy):
     """Concrete strategy for the BGE-Small (X-Slim) model."""
 
     @property
     def tier_name(self) -> str:
         return XSLIM_TIER
-
-    async def embed(self, texts: list[str], batch_size: int) -> list[dict[str, Any]]:
-        model = await asyncio.to_thread(self._ensure_loaded)
-        embeddings = await asyncio.to_thread(
-            model.encode,
-            texts,
-            batch_size=batch_size,
-            convert_to_numpy=True,
-            show_progress_bar=False,
-            normalize_embeddings=True,
-        )
-        return [
-            {"dense": emb.tolist(), "sparse": None} for emb in np.asarray(embeddings)
-        ]
 
 
 class StrategyFactory:
@@ -240,6 +230,7 @@ class Embedder:
 
 __all__ = [
     "EmbeddingStrategy",
+    "DenseEmbeddingStrategy",
     "BGEM3Strategy",
     "BGESlimStrategy",
     "BGEXSlimStrategy",
