@@ -82,6 +82,7 @@ scripts/reindex_all_tiers.sh
 
 .gemini/
 gha-creds-*.json
+.uv.runpod.toml
 
 # Gemini Context Files
 PROJECT_CONTEXT.md

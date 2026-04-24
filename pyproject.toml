@@ -4,21 +4,18 @@ build-backend = "hatchling.build"
 
 [project]
 name = "everspring-mcp"
-version = "0.1.0"
+version = "0.1.1"
 description = "MCP server providing LLMs with real-time Spring documentation"
 readme = "README.md"
 license = "MIT"
-requires-python = ">=3.11"
-authors = [
-    { name = "Alper Karaca" }
-]
+requires-python = ">=3.12, <3.15"
+authors = [{ name = "Alper Karaca" }]
 keywords = ["mcp", "spring", "documentation", "rag", "llm"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Topic :: Software Development :: Documentation",
 ]
@@ -38,14 +35,19 @@ dependencies = [
     "aiosqlite>=0.19.0",
     "rank-bm25>=0.2.2",
     "tenacity>=8.2.0",
-    "torch>=2.4",
     "rich>=13.7.0",
     "fastapi>=0.135.3",
     "granian>=2.7.3",
+    # torch is declared here in base dependencies (not in an optional extra) so
+    # that sentence-transformers and torch share a single resolution slot.
+    # Without this, uv resolves torch twice: once for the extra (AMD repo) and
+    # once as a transitive dep of sentence-transformers (PyPI) — causing a
+    # double download or a conflict.
+    "torch>=2.4",
 ]
 
-
 [project.optional-dependencies]
+flag-embedding = ["FlagEmbedding>=1.3.3"]
 dev = [
     "pytest>=7.4.0",
     "pytest-asyncio>=0.21.0",
@@ -53,16 +55,51 @@ dev = [
     "ruff>=0.1.0",
     "mypy>=1.5.0",
     "boto3-stubs[s3]>=1.28.0",
-    "moto[s3]>=4.2.0",
+    "moto[s3]>=5.1.22",
 ]
 
-[[tool.uv.index]]
-name = "pytorch-cpu"
-url = "https://download.pytorch.org/whl/cpu"
-explicit = true
+# ──────────────────────────────────────────────────────────────────────────────
+# Source overrides
+#
+# Default (home machine — Linux or Windows with AMD GPU):
+#   torch is sourced from AMD's own repo (repo.radeon.com), NOT from
+#   download.pytorch.org/whl/rocm7.2. The PyTorch.org ROCm index ships
+#   torch==2.11.0 which depends on triton-rocm==3.6.0 — a package that does
+#   not yet exist, making the entire resolution unsatisfiable.
+#   AMD's repo ships torch==2.9.1+rocm7.2 with triton==3.5.1, which is stable
+#   and fully tested by AMD.
+#
+#   No `extra` filter is used here — only platform markers. This ensures that
+#   ALL consumers of torch in the dependency graph (including transitive ones
+#   like sentence-transformers) resolve to the same single wheel, preventing
+#   the double-download problem.
+#
+# CUDA override (RunPod / NVIDIA machines):
+#   Place the provided uv.toml in the project root on that machine.
+#   uv.toml takes precedence over pyproject.toml for [tool.uv.*] settings,
+#   so torch will be sourced from the cu128 index without modifying this file.
+# ──────────────────────────────────────────────────────────────────────────────
 
 [tool.uv.sources]
-torch = { index = "pytorch-cpu" }
+torch = [
+    # Linux — AMD's tested ROCm 7.2 wheel (torch 2.9.1)
+    { url = "https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2/torch-2.9.1%2Brocm7.2.0.lw.git7e1940d4-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux'" },
+]
+
+[tool.uv]
+conflicts = [
+  [
+    { extra = "rocm" },
+    { extra = "cu128" },
+  ]
+]
+override-dependencies = [
+    # torch 2.9.1+rocm7.2 depends on triton==3.5.1+rocm7.2.0.gita272dfa8.
+    # This version has a local identifier (+rocm...) so it does not exist on
+    # PyPI. tool.uv.sources does not apply to transitive deps, so we force
+    # the AMD wheel for ALL triton consumers in the entire dependency tree.
+    "triton @ https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2/triton-3.5.1%2Brocm7.2.0.gita272dfa8-cp312-cp312-linux_x86_64.whl ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
 
 [project.scripts]
 everspring-mcp = "everspring_mcp.mcp.server:run_server"
@@ -77,25 +114,25 @@ Issues = "https://github.com/alpeerkaraca/everspring-mcp/issues"
 packages = ["src/everspring_mcp"]
 
 [tool.ruff]
-target-version = "py311"
+target-version = "py312"
 line-length = 88
 
 [tool.ruff.lint]
 select = [
-    "E",    # pycodestyle errors
-    "W",    # pycodestyle warnings
-    "F",    # pyflakes
-    "I",    # isort
-    "B",    # flake8-bugbear
-    "C4",   # flake8-comprehensions
-    "UP",   # pyupgrade
+    "E",  # pycodestyle errors
+    "W",  # pycodestyle warnings
+    "F",  # pyflakes
+    "I",  # isort
+    "B",  # flake8-bugbear
+    "C4", # flake8-comprehensions
+    "UP", # pyupgrade
 ]
 ignore = [
-    "E501",  # line too long (handled by formatter)
+    "E501", # line too long (handled by formatter)
 ]
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.12"
 strict = true
 plugins = ["pydantic.mypy"]
 
@@ -103,8 +140,3 @@ plugins = ["pydantic.mypy"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 addopts = "-v --cov=src/everspring_mcp --cov-report=term-missing"
-
-[dependency-groups]
-dev = [
-    "moto>=5.1.22",
-]
