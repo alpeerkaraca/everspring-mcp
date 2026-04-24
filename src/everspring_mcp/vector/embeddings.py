@@ -108,27 +108,69 @@ class BGEM3Strategy(EmbeddingStrategy):
     def tier_name(self) -> str:
         return MAIN_TIER
 
+    def _ensure_loaded(self):
+        if self._model is None:
+            import torch
+            device, dtype = self._resolve_device_and_dtype()
+            logger.info("Loading %s model: %s", self.tier_name, self.model_name)
+            try:
+                from FlagEmbedding import BGEM3FlagModel
+                use_fp16 = dtype != torch.float32
+                self._model = BGEM3FlagModel(self.model_name, use_fp16=use_fp16, device=device)
+                self._is_flag_model = True
+            except ImportError:
+                logger.warning("FlagEmbedding not installed. Falling back to SentenceTransformer. Sparse embeddings disabled.")
+                from sentence_transformers import SentenceTransformer
+                self._is_flag_model = False
+                try:
+                    self._model = SentenceTransformer(
+                        self.model_name,
+                        device=device,
+                        model_kwargs={"dtype": dtype},
+                        processor_kwargs={"use_fast": True},
+                    )
+                except TypeError:
+                    self._model = SentenceTransformer(
+                        self.model_name,
+                        device=device,
+                        model_kwargs={"dtype": dtype},
+                        tokenizer_kwargs={"use_fast": True},
+                    )
+        return self._model
+
     async def embed(self, texts: list[str], batch_size: int) -> list[dict[str, Any]]:
         model = await asyncio.to_thread(self._ensure_loaded)
-        # BGE-M3 supports dense and sparse (lexical) weights
-        output = await asyncio.to_thread(
-            model.encode,
-            texts,
-            batch_size=batch_size,
-            return_dense=True,
-            return_sparse=True,
-            return_colbert_vecs=False,
-            convert_to_numpy=True,
-            show_progress_bar=False,
-        )
+        if getattr(self, "_is_flag_model", False):
+            # BGE-M3 supports dense and sparse (lexical) weights natively
+            output = await asyncio.to_thread(
+                model.encode,
+                texts,
+                batch_size=batch_size,
+                max_length=8192,
+                return_dense=True,
+                return_sparse=True,
+                return_colbert_vecs=False,
+            )
+            dense_vecs = output["dense_vecs"]
+            lexical_weights = output["lexical_weights"]
 
-        dense_vecs = output["dense_vecs"]
-        lexical_weights = output["lexical_weights"]
-
-        return [
-            {"dense": d.tolist(), "sparse": s}
-            for d, s in zip(dense_vecs, lexical_weights, strict=True)
-        ]
+            return [
+                {"dense": d.tolist(), "sparse": s}
+                for d, s in zip(dense_vecs, lexical_weights, strict=True)
+            ]
+        else:
+            import numpy as np
+            embeddings = await asyncio.to_thread(
+                model.encode,
+                texts,
+                batch_size=batch_size,
+                convert_to_numpy=True,
+                show_progress_bar=False,
+                normalize_embeddings=True,
+            )
+            return [
+                {"dense": emb.tolist(), "sparse": None} for emb in np.asarray(embeddings)
+            ]
 
 
 class DenseEmbeddingStrategy(EmbeddingStrategy):
