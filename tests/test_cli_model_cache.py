@@ -7,6 +7,11 @@ import argparse
 import pytest
 
 from everspring_mcp import main as cli_main
+from everspring_mcp.cli import index as index_cli
+from everspring_mcp.cli import sync as sync_cli
+from everspring_mcp.cli import mcp as mcp_cli
+from everspring_mcp.cli import model_cache as cache_cli
+from everspring_mcp.cli import utils as cli_utils
 from everspring_mcp.vector.config import VectorConfig
 from everspring_mcp.vector.embeddings import DEFAULT_MAIN_MODEL
 
@@ -21,7 +26,7 @@ async def test_run_model_cache_prefetches_model(
         calls["prefetched"] = True
 
     monkeypatch.setattr(
-        cli_main.Embedder,
+        cache_cli.Embedder,
         "prefetch_model",
         fake_prefetch_model,
     )
@@ -32,7 +37,7 @@ async def test_run_model_cache_prefetches_model(
         json=True,
     )
 
-    exit_code = await cli_main._run_model_cache(args)
+    exit_code = await cache_cli._run_model_cache(args)
 
     assert exit_code == 0
     assert calls["prefetched"] is True
@@ -53,7 +58,7 @@ async def test_run_model_cache_uses_defaults(
         async def prefetch_model(self) -> None:
             captured["prefetched"] = True
 
-    monkeypatch.setattr(cli_main, "Embedder", FakeEmbedder)
+    monkeypatch.setattr(cache_cli, "Embedder", FakeEmbedder)
     monkeypatch.setattr(VectorConfig, "from_env", classmethod(lambda cls: cls()))
 
     args = argparse.Namespace(
@@ -62,7 +67,7 @@ async def test_run_model_cache_uses_defaults(
         json=True,
     )
 
-    exit_code = await cli_main._run_model_cache(args)
+    exit_code = await cache_cli._run_model_cache(args)
 
     assert exit_code == 0
     assert captured["prefetched"] is True
