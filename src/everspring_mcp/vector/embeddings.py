@@ -230,6 +230,7 @@ class Embedder:
 
 __all__ = [
     "EmbeddingStrategy",
+    "DenseEmbeddingStrategy",
     "BGEM3Strategy",
     "BGESlimStrategy",
     "BGEXSlimStrategy",
