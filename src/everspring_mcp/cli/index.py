@@ -17,8 +17,7 @@ from everspring_mcp.vector.embeddings import default_model_for_tier
 from everspring_mcp.vector.indexer import VectorIndexer
 from everspring_mcp.vector.retriever import HybridRetriever
 from everspring_mcp.cli.utils import (
-    _tier_chroma_dir,
-    _auto_refresh_runtime_snapshots,
+    resolve_vector_config,
     _render_search_results,
     console,
 )
@@ -29,27 +28,9 @@ async def _run_index(args: argparse.Namespace) -> int:
     if args.submodule and not args.module:
         raise SystemExit("--submodule requires --module for index --reindex")
 
-    config = VectorConfig.from_env()
+    config = await resolve_vector_config(args)
     updates: dict[str, Any] = {}
-    if args.data_dir:
-        updates["data_dir"] = Path(args.data_dir)
-    if args.db_filename:
-        updates["db_filename"] = args.db_filename
-    if args.docs_subdir:
-        updates["docs_subdir"] = args.docs_subdir
-    if args.chroma_dir:
-        updates["chroma_dir"] = Path(args.chroma_dir)
-    if args.collection:
-        updates["collection_name"] = args.collection
-    if args.embed_model:
-        updates["embedding_model"] = args.embed_model
-    selected_tier = getattr(args, "tier", "main")
-    updates["embedding_tier"] = selected_tier
-    resolved_model = args.embed_model or default_model_for_tier(selected_tier)
-    updates["embedding_model"] = resolved_model
-    if not args.chroma_dir and not os.environ.get(VectorConfig.ENV_CHROMA_DIR):
-        updates["chroma_dir"] = _tier_chroma_dir(selected_tier, resolved_model)
-    default_chunk_size, default_overlap = chunk_defaults_for_tier(selected_tier)
+    default_chunk_size, default_overlap = chunk_defaults_for_tier(config.embedding_tier)
     if args.max_tokens is not None:
         updates["max_tokens"] = args.max_tokens
     else:
@@ -66,11 +47,6 @@ async def _run_index(args: argparse.Namespace) -> int:
         updates["chroma_upsert_batch_size"] = args.upsert_batch_size
     if updates:
         config = config.model_copy(update=updates)
-    await _auto_refresh_runtime_snapshots(
-        model_name=config.embedding_model,
-        tier=config.embedding_tier,
-        data_dir=config.data_dir,
-    )
 
     reset_count = 0
     deleted_vectors = 0
@@ -156,21 +132,7 @@ async def _run_index(args: argparse.Namespace) -> int:
 
 
 async def _run_search(args: argparse.Namespace) -> int:
-    config = VectorConfig.from_env()
-    selected_tier = getattr(args, "tier", "main")
-    resolved_model = default_model_for_tier(selected_tier)
-    updates: dict[str, Any] = {
-        "embedding_tier": selected_tier,
-        "embedding_model": resolved_model,
-    }
-    if not os.environ.get(VectorConfig.ENV_CHROMA_DIR):
-        updates["chroma_dir"] = _tier_chroma_dir(selected_tier, resolved_model)
-    config = config.model_copy(update=updates)
-    await _auto_refresh_runtime_snapshots(
-        model_name=config.embedding_model,
-        tier=config.embedding_tier,
-        data_dir=config.data_dir,
-    )
+    config = await resolve_vector_config(args)
     retriever = HybridRetriever(config=config)
 
     if config.embedding_tier != "main" and (
