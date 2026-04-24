@@ -8,10 +8,8 @@ version = "0.1.0"
 description = "MCP server providing LLMs with real-time Spring documentation"
 readme = "README.md"
 license = "MIT"
-requires-python = ">=3.11"
-authors = [
-    { name = "Alper Karaca" }
-]
+requires-python = ">=3.12"
+authors = [{ name = "Alper Karaca" }]
 keywords = ["mcp", "spring", "documentation", "rag", "llm"]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -22,7 +20,6 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Topic :: Software Development :: Documentation",
 ]
-
 dependencies = [
     "pydantic>=2.0.0",
     "httpx>=0.25.0",
@@ -34,16 +31,24 @@ dependencies = [
     "markdownify>=0.11.0",
     "lxml>=4.9.0",
     "tiktoken>=0.7.0",
-    "sentence-transformers>=2.7.0",
+    "sentence-transformers>=3.0.0",
     "aiosqlite>=0.19.0",
     "rank-bm25>=0.2.2",
     "tenacity>=8.2.0",
-    "torch>=2.4",
     "rich>=13.7.0",
     "fastapi>=0.135.3",
     "granian>=2.7.3",
 ]
 
+# [[tool.uv.index]]
+# name = "pytorch-cu128"
+# url = "https://download.pytorch.org/whl/cu128"
+# explicit = true
+
+# [tool.uv.sources]
+# torch = { index = "pytorch-cu128" }
+# torchvision = { index = "pytorch-cu128" }
+# torchaudio = { index = "pytorch-cu128" }
 
 [project.optional-dependencies]
 dev = [
@@ -53,20 +58,12 @@ dev = [
     "ruff>=0.1.0",
     "mypy>=1.5.0",
     "boto3-stubs[s3]>=1.28.0",
-    "moto[s3]>=4.2.0",
+    "moto[s3]>=5.1.22",
 ]
-
-[[tool.uv.index]]
-name = "pytorch-cpu"
-url = "https://download.pytorch.org/whl/cpu"
-explicit = true
-
-[tool.uv.sources]
-torch = { index = "pytorch-cpu" }
 
 [project.scripts]
 everspring-mcp = "everspring_mcp.mcp.server:run_server"
-everspring-client = "everspring_mcp.mcp.terminal_search:run_interactive"
+everspring-client = "everspring_mcp.mcp.client:run_interactive"
 
 [project.urls]
 Homepage = "https://github.com/alpeerkaraca/everspring-mcp"
@@ -81,18 +78,8 @@ target-version = "py311"
 line-length = 88
 
 [tool.ruff.lint]
-select = [
-    "E",    # pycodestyle errors
-    "W",    # pycodestyle warnings
-    "F",    # pyflakes
-    "I",    # isort
-    "B",    # flake8-bugbear
-    "C4",   # flake8-comprehensions
-    "UP",   # pyupgrade
-]
-ignore = [
-    "E501",  # line too long (handled by formatter)
-]
+select = ["E", "W", "F", "I", "B", "C4", "UP"]
+ignore = ["E501"]
 
 [tool.mypy]
 python_version = "3.11"
@@ -105,6 +92,4 @@ testpaths = ["tests"]
 addopts = "-v --cov=src/everspring_mcp --cov-report=term-missing"
 
 [dependency-groups]
-dev = [
-    "moto>=5.1.22",
-]
+dev = ["moto>=5.1.22"]
