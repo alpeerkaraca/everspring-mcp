@@ -48,6 +48,9 @@ async def test_run_manifest_prime_honors_parallel_jobs_limit(
         def __init__(self, _config: SyncConfig) -> None:
             pass
 
+        async def discover_all_targets(self) -> list[tuple[str, str, str | None]]:
+            return targets
+
         async def ensure_manifest(
             self,
             module: str,
@@ -81,7 +84,6 @@ async def test_run_manifest_prime_honors_parallel_jobs_limit(
     ]
 
     monkeypatch.setattr(sync_cli, "S3SyncService", FakeService)
-    monkeypatch.setattr(sync_cli, "_load_sync_targets_from_matrix", lambda _path: targets)
 
     args = argparse.Namespace(
         all=True,

@@ -69,10 +69,10 @@ async def _run_serve(args: argparse.Namespace) -> int:
     return 0
 
 async def _run_client(args: argparse.Namespace) -> int:
-    from everspring_mcp.mcp.terminal_search import LocalSearchCLI
+    from everspring_mcp.mcp.client import MCPClient
 
     show_progress = not getattr(args, "no_progress", False)
-    client = LocalSearchCLI(show_progress=show_progress)
+    client = MCPClient(show_progress=show_progress)
 
     logger.info("EverSpring MCP - Spring Documentation Search")
     logger.info("=" * 50)

@@ -1927,6 +1927,57 @@ class S3SyncService:
         for page in page_iterator:
             yield page
 
+    async def discover_all_targets(self) -> list[tuple[str, str, str | None]]:
+        """Discover all module, version, submodule targets from S3 raw-data prefix."""
+        targets: list[tuple[str, str, str | None]] = []
+        paginator = self._s3.get_paginator("list_objects_v2")
+        base_prefix = f"{self.config.s3_prefix}/{self.config.raw_data_subprefix}/"
+        
+        def _get_common_prefixes(prefix: str) -> list[str]:
+            prefixes = []
+            for page in paginator.paginate(Bucket=self.config.s3_bucket, Prefix=prefix, Delimiter="/"):
+                prefixes.extend([p["Prefix"] for p in page.get("CommonPrefixes", [])])
+            return prefixes
+
+        try:
+            module_prefixes = await asyncio.to_thread(_get_common_prefixes, base_prefix)
+        except Exception as e:
+            logger.error("Failed to list modules in S3: %s", e)
+            return []
+
+        async def _discover_versions(mod_prefix: str) -> list[tuple[str, str, str | None]]:
+            mod_segment = mod_prefix[len(base_prefix):].strip("/")
+            
+            module_val = mod_segment
+            submodule_val: str | None = None
+            
+            for sm in sorted(SpringModule, key=lambda m: len(m.value), reverse=True):
+                if mod_segment == sm.value:
+                    module_val = sm.value
+                    submodule_val = None
+                    break
+                elif mod_segment.startswith(sm.value + "-"):
+                    module_val = sm.value
+                    submodule_val = mod_segment[len(sm.value) + 1 :]
+                    break
+
+            try:
+                ver_prefixes = await asyncio.to_thread(_get_common_prefixes, mod_prefix)
+                return [(module_val, vp[len(mod_prefix):].strip("/"), submodule_val) for vp in ver_prefixes]
+            except Exception as e:
+                logger.error("Failed to list versions for %s: %s", mod_prefix, e)
+                return []
+
+        if not module_prefixes:
+            return targets
+
+        results = await asyncio.gather(*[_discover_versions(mp) for mp in module_prefixes])
+        for res in results:
+            targets.extend(res)
+
+        logger.info("Discovered %d targets from S3", len(targets))
+        return targets
+
     async def build_manifest_from_s3(
         self,
         module: str,

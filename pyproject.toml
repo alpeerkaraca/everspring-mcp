@@ -19,7 +19,6 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Topic :: Software Development :: Documentation",
 ]
-
 dependencies = [
     "pydantic>=2.0.0",
     "httpx>=0.25.0",
@@ -31,7 +30,7 @@ dependencies = [
     "markdownify>=0.11.0",
     "lxml>=4.9.0",
     "tiktoken>=0.7.0",
-    "sentence-transformers>=2.7.0",
+    "sentence-transformers>=3.0.0",
     "aiosqlite>=0.19.0",
     "rank-bm25>=0.2.2",
     "tenacity>=8.2.0",
@@ -45,6 +44,16 @@ dependencies = [
     # double download or a conflict.
     "torch>=2.4",
 ]
+
+# [[tool.uv.index]]
+# name = "pytorch-cu128"
+# url = "https://download.pytorch.org/whl/cu128"
+# explicit = true
+
+# [tool.uv.sources]
+# torch = { index = "pytorch-cu128" }
+# torchvision = { index = "pytorch-cu128" }
+# torchaudio = { index = "pytorch-cu128" }
 
 [project.optional-dependencies]
 flag-embedding = ["FlagEmbedding>=1.3.3"]
@@ -103,7 +112,7 @@ override-dependencies = [
 
 [project.scripts]
 everspring-mcp = "everspring_mcp.mcp.server:run_server"
-everspring-client = "everspring_mcp.mcp.terminal_search:run_interactive"
+everspring-client = "everspring_mcp.mcp.client:run_interactive"
 
 [project.urls]
 Homepage = "https://github.com/alpeerkaraca/everspring-mcp"
