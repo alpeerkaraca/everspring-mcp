@@ -98,7 +98,12 @@ async def _run_index(args: argparse.Namespace) -> int:
             deleted_vectors = max(0, before_delete - after_delete)
 
     async with VectorIndexer(config=config) as indexer:
-        stats = await indexer.index_unindexed(limit=args.limit)
+        if getattr(args, "all", False):
+            # Calculate total number of documents in DB to override limit
+            limit = await indexer._storage.documents.count()
+        else:
+            limit = args.limit
+        stats = await indexer.index_unindexed(limit=limit)
 
     bm25_index_built = False
     if args.build_bm25 and config.embedding_tier != "main":
