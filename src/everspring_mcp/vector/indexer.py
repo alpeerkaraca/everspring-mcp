@@ -540,11 +540,12 @@ class VectorIndexer:
             dense = vectors[i]["dense"]
             sparse = vectors[i]["sparse"]
 
-            # Metadata Size Protection: Top 300 tokens
+            # PERFORMANCE OPTIMIZATION: Top 150 tokens for local RTX 5090 execution.
+            # Minimizes SQLite metadata bloat and JSON parsing overhead.
             top_sparse = None
             if sparse:
                 top_sparse = dict(
-                    sorted(sparse.items(), key=lambda x: x[1], reverse=True)[:300]
+                    sorted(sparse.items(), key=lambda x: x[1], reverse=True)[:150]
                 )
 
             payloads.append(
@@ -569,42 +570,20 @@ class VectorIndexer:
         if not payloads:
             return 0, 0
 
-        # Safe Metadata Storage: Serialize sparse weights
+        # Safe Metadata Storage: Serialize sparse weights for local execution
         metadatas = []
-        is_native_sparse = self.config.embedding_tier == MAIN_TIER
-
-        dense_embeddings = []
-        sparse_embeddings = []
-
         for item in payloads:
             meta = item.metadata.copy()
             if item.sparse_weights:
-                if is_native_sparse:
-                    # For native sparse, we pass them in embeddings dict,
-                    # NOT in metadata to avoid redundancy and enable native search
-                    sparse_embeddings.append(item.sparse_weights)
-                else:
-                    meta["sparse_weights"] = json.dumps(
-                        item.sparse_weights, separators=(",", ":")
-                    )
-            elif is_native_sparse:
-                sparse_embeddings.append({})
-
-            dense_embeddings.append(item.embedding)
+                meta["sparse_weights"] = json.dumps(
+                    item.sparse_weights, separators=(",", ":")
+                )
             metadatas.append(meta)
-
-        if is_native_sparse:
-            final_embeddings = {
-                "#embedding": dense_embeddings,
-                "sparse_embedding": sparse_embeddings,
-            }
-        else:
-            final_embeddings = dense_embeddings
 
         await asyncio.to_thread(
             self.chroma.upsert,
             ids=[item.chunk_id for item in payloads],
-            embeddings=final_embeddings,
+            embeddings=[item.embedding for item in payloads],
             documents=[item.content for item in payloads],
             metadatas=metadatas,
         )
