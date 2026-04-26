@@ -255,6 +255,41 @@ class DocumentRepository:
         await self.db.commit()
         logger.debug("Upserted document: %s", doc.id)
 
+    async def upsert_many(self, docs: list[DocumentRecord]) -> None:
+        """Insert or update multiple documents in a single transaction.
+
+        Args:
+            docs: List of documents to upsert
+        """
+        if not docs:
+            return
+
+        await self.db.executemany(
+            """
+            INSERT INTO documents (
+                id, url, title, module, submodule, major_version, minor_version, patch_version,
+                content_hash, file_path, s3_key, size_bytes, scraped_at, synced_at,
+                schema_version, is_indexed
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                title = excluded.title,
+                content_hash = excluded.content_hash,
+                file_path = excluded.file_path,
+                s3_key = excluded.s3_key,
+                size_bytes = excluded.size_bytes,
+                scraped_at = excluded.scraped_at,
+                synced_at = excluded.synced_at,
+                schema_version = excluded.schema_version,
+                is_indexed = CASE 
+                    WHEN excluded.content_hash != documents.content_hash THEN 0 
+                    ELSE documents.is_indexed 
+                END
+            """,
+            (self._to_row_tuple(doc) for doc in docs),
+        )
+        await self.db.commit()
+        logger.debug("Upserted %d documents in batch", len(docs))
+
     async def save(self, page: ScrapedPage, s3_key: str = "", file_path: str = "") -> None:
         """Convert ScrapedPage to DocumentRecord and upsert.
 
@@ -284,6 +319,45 @@ class DocumentRepository:
             is_indexed=False,
         )
         await self.upsert(doc)
+
+    async def save_many(
+        self, pages: list[ScrapedPage], s3_key: str = "", file_path: str = ""
+    ) -> None:
+        """Convert multiple ScrapedPages to DocumentRecords and upsert in batch.
+
+        Args:
+            pages: List of scraped pages
+            s3_key: Optional S3 key (used if one key applies to all, rare)
+            file_path: Optional local file path
+        """
+        if not pages:
+            return
+
+        from everspring_mcp.models.base import compute_hash
+
+        docs = []
+        for page in pages:
+            doc = DocumentRecord(
+                id=compute_hash(str(page.url)),
+                url=str(page.url),
+                title=page.title,
+                module=page.module.value,
+                submodule=page.submodule,
+                major_version=page.version.major,
+                minor_version=page.version.minor,
+                patch_version=page.version.patch,
+                content_hash=page.content_hash,
+                file_path=file_path or s3_key,  # Fallback
+                s3_key=s3_key,
+                size_bytes=len(page.markdown_content.encode("utf-8")),
+                scraped_at=page.scraped_at,
+                synced_at=datetime.now(UTC),
+                schema_version="1.0",
+                is_indexed=False,
+            )
+            docs.append(doc)
+
+        await self.upsert_many(docs)
 
     async def get_by_id(self, doc_id: str) -> DocumentRecord | None:
         """Get document by ID.
@@ -353,13 +427,8 @@ class DocumentRepository:
         """
         module_str = module.value if isinstance(module, SpringModule) else module
 
-        filters = ["module = ?", "major_version = ?"]
-        params: list[object] = [module_str, major]
-        if submodule is None:
-            filters.append("submodule IS NULL")
-        else:
-            filters.append("submodule = ?")
-            params.append(submodule)
+        filters = ["module = ?", "major_version = ?", "submodule IS ?"]
+        params: list[object] = [module_str, major, submodule]
 
         if minor is not None:
             filters.append("minor_version = ?")
@@ -445,13 +514,8 @@ class DocumentRepository:
 
         if module is not None:
             module_str = module.value if isinstance(module, SpringModule) else module
-            filters.append("module = ?")
-            params.append(module_str)
-            if submodule is None:
-                filters.append("submodule IS NULL")
-            else:
-                filters.append("submodule = ?")
-                params.append(submodule)
+            filters.extend(["module = ?", "submodule IS ?"])
+            params.extend([module_str, submodule])
         if major is not None:
             filters.append("major_version = ?")
             params.append(major)
@@ -557,24 +621,14 @@ class DocumentRepository:
         minor = int(parts[1]) if len(parts) > 1 else 0
         patch = int(parts[2]) if len(parts) > 2 else 0
 
-        if submodule is None:
-            cursor = await self.db.execute(
-                """
-                SELECT s3_key, content_hash FROM documents
-                WHERE module = ? AND submodule IS NULL
-                AND major_version = ? AND minor_version = ? AND patch_version = ?
-                """,
-                (module, major, minor, patch),
-            )
-        else:
-            cursor = await self.db.execute(
-                """
-                SELECT s3_key, content_hash FROM documents
-                WHERE module = ? AND submodule = ?
-                AND major_version = ? AND minor_version = ? AND patch_version = ?
-                """,
-                (module, submodule, major, minor, patch),
-            )
+        cursor = await self.db.execute(
+            """
+            SELECT s3_key, content_hash FROM documents
+            WHERE module = ? AND submodule IS ?
+            AND major_version = ? AND minor_version = ? AND patch_version = ?
+            """,
+            (module, submodule, major, minor, patch),
+        )
         rows = await cursor.fetchall()
         return {row["s3_key"]: row["content_hash"] for row in rows}
 
@@ -712,26 +766,15 @@ class SyncHistoryRepository:
         Returns:
             Most recent sync record or None
         """
-        if submodule is None:
-            cursor = await self.db.execute(
-                """
-                SELECT * FROM sync_history
-                WHERE module = ? AND submodule IS NULL AND version = ?
-                ORDER BY started_at DESC
-                LIMIT 1
-                """,
-                (module, version),
-            )
-        else:
-            cursor = await self.db.execute(
-                """
-                SELECT * FROM sync_history
-                WHERE module = ? AND submodule = ? AND version = ?
-                ORDER BY started_at DESC
-                LIMIT 1
-                """,
-                (module, submodule, version),
-            )
+        cursor = await self.db.execute(
+            """
+            SELECT * FROM sync_history
+            WHERE module = ? AND submodule IS ? AND version = ?
+            ORDER BY started_at DESC
+            LIMIT 1
+            """,
+            (module, submodule, version),
+        )
         row = await cursor.fetchone()
         return SyncHistoryRecord.from_row(row) if row else None
 
@@ -764,26 +807,15 @@ class SyncHistoryRepository:
             List of sync history records
         """
         if module:
-            if submodule is None:
-                cursor = await self.db.execute(
-                    """
-                    SELECT * FROM sync_history
-                    WHERE module = ? AND submodule IS NULL
-                    ORDER BY started_at DESC
-                    LIMIT ?
-                    """,
-                    (module, limit),
-                )
-            else:
-                cursor = await self.db.execute(
-                    """
-                    SELECT * FROM sync_history
-                    WHERE module = ? AND submodule = ?
-                    ORDER BY started_at DESC
-                    LIMIT ?
-                    """,
-                    (module, submodule, limit),
-                )
+            cursor = await self.db.execute(
+                """
+                SELECT * FROM sync_history
+                WHERE module = ? AND submodule IS ?
+                ORDER BY started_at DESC
+                LIMIT ?
+                """,
+                (module, submodule, limit),
+            )
         else:
             cursor = await self.db.execute(
                 """
@@ -823,16 +855,10 @@ class LocalManifestRepository:
         Returns:
             Cached manifest or None
         """
-        if submodule is None:
-            cursor = await self.db.execute(
-                "SELECT * FROM local_manifest WHERE module = ? AND submodule IS NULL AND version = ?",
-                (module, version),
-            )
-        else:
-            cursor = await self.db.execute(
-                "SELECT * FROM local_manifest WHERE module = ? AND submodule = ? AND version = ?",
-                (module, submodule, version),
-            )
+        cursor = await self.db.execute(
+            "SELECT * FROM local_manifest WHERE module = ? AND submodule IS ? AND version = ?",
+            (module, submodule, version),
+        )
         row = await cursor.fetchone()
         return LocalManifestRecord.from_row(row) if row else None
 
@@ -857,56 +883,30 @@ class LocalManifestRepository:
         )
 
         fetched_at = datetime.now(UTC).isoformat()
-        if submodule is None:
-            cursor = await self.db.execute(
+        cursor = await self.db.execute(
+            """
+            UPDATE local_manifest
+            SET manifest_hash = ?, manifest_json = ?, fetched_at = ?
+            WHERE module = ? AND submodule IS ? AND version = ?
+            """,
+            (manifest_hash, manifest_json, fetched_at, module, submodule, version),
+        )
+        if cursor.rowcount == 0:
+            await self.db.execute(
                 """
-                UPDATE local_manifest
-                SET manifest_hash = ?, manifest_json = ?, fetched_at = ?
-                WHERE module = ? AND submodule IS NULL AND version = ?
+                INSERT INTO local_manifest (
+                    module, submodule, version, manifest_hash, manifest_json, fetched_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (manifest_hash, manifest_json, fetched_at, module, version),
+                (
+                    module,
+                    submodule,
+                    version,
+                    manifest_hash,
+                    manifest_json,
+                    fetched_at,
+                ),
             )
-            if cursor.rowcount == 0:
-                await self.db.execute(
-                    """
-                    INSERT INTO local_manifest (
-                        module, submodule, version, manifest_hash, manifest_json, fetched_at
-                    ) VALUES (?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        module,
-                        submodule,
-                        version,
-                        manifest_hash,
-                        manifest_json,
-                        fetched_at,
-                    ),
-                )
-        else:
-            cursor = await self.db.execute(
-                """
-                UPDATE local_manifest
-                SET manifest_hash = ?, manifest_json = ?, fetched_at = ?
-                WHERE module = ? AND submodule = ? AND version = ?
-                """,
-                (manifest_hash, manifest_json, fetched_at, module, submodule, version),
-            )
-            if cursor.rowcount == 0:
-                await self.db.execute(
-                    """
-                    INSERT INTO local_manifest (
-                        module, submodule, version, manifest_hash, manifest_json, fetched_at
-                    ) VALUES (?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        module,
-                        submodule,
-                        version,
-                        manifest_hash,
-                        manifest_json,
-                        fetched_at,
-                    ),
-                )
         await self.db.commit()
         logger.debug("Saved manifest for %s/%s", module, version)
 
@@ -922,16 +922,10 @@ class LocalManifestRepository:
         Returns:
             True if manifest was deleted
         """
-        if submodule is None:
-            cursor = await self.db.execute(
-                "DELETE FROM local_manifest WHERE module = ? AND submodule IS NULL AND version = ?",
-                (module, version),
-            )
-        else:
-            cursor = await self.db.execute(
-                "DELETE FROM local_manifest WHERE module = ? AND submodule = ? AND version = ?",
-                (module, submodule, version),
-            )
+        cursor = await self.db.execute(
+            "DELETE FROM local_manifest WHERE module = ? AND submodule IS ? AND version = ?",
+            (module, submodule, version),
+        )
         await self.db.commit()
         return cursor.rowcount > 0
 

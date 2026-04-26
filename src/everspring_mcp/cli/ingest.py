@@ -58,9 +58,10 @@ async def _run_ingest_github(args: argparse.Namespace) -> int:
                 module=module,
                 s3_client=s3_client
             )
-            for page in pages:
-                await storage.documents.save(page)
+            if pages:
+                await storage.documents.save_many(pages)
                 
+            for page in pages:
                 results.append({
                     "type": "wiki",
                     "name": page.title,
@@ -69,6 +70,7 @@ async def _run_ingest_github(args: argparse.Namespace) -> int:
                 })
 
         if args.files:
+            pages_to_save = []
             for file_path in args.files:
                 try:
                     logger.info(f"Ingesting Repo file: {file_path}")
@@ -88,7 +90,7 @@ async def _run_ingest_github(args: argparse.Namespace) -> int:
                         content_type=ContentType.REFERENCE
                     )
                     
-                    await storage.documents.save(page)
+                    pages_to_save.append(page)
 
                     if s3_client:
                         url_hash = compute_hash(url)[:16]
@@ -111,6 +113,9 @@ async def _run_ingest_github(args: argparse.Namespace) -> int:
                 except Exception as e:
                     logger.error(f"Failed to ingest repo file {file_path}: {e}")
                     results.append({"type": "file", "name": file_path, "status": "failed", "error": str(e)})
+            
+            if pages_to_save:
+                await storage.documents.save_many(pages_to_save)
 
     finally:
         await storage.close()
