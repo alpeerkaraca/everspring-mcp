@@ -28,7 +28,7 @@ from everspring_mcp.utils.logging import get_logger
 from everspring_mcp.vector.chroma_client import ChromaClient
 from everspring_mcp.vector.chunking import MarkdownChunker
 from everspring_mcp.vector.config import VectorConfig
-from everspring_mcp.vector.embeddings import Embedder
+from everspring_mcp.vector.embeddings import MAIN_TIER, Embedder
 
 logger = get_logger("vector.indexer")
 HNSW_FINALIZATION_MESSAGE = (
@@ -571,18 +571,40 @@ class VectorIndexer:
 
         # Safe Metadata Storage: Serialize sparse weights
         metadatas = []
+        is_native_sparse = self.config.embedding_tier == MAIN_TIER
+
+        dense_embeddings = []
+        sparse_embeddings = []
+
         for item in payloads:
             meta = item.metadata.copy()
             if item.sparse_weights:
-                meta["sparse_weights"] = json.dumps(
-                    item.sparse_weights, separators=(",", ":")
-                )
+                if is_native_sparse:
+                    # For native sparse, we pass them in embeddings dict,
+                    # NOT in metadata to avoid redundancy and enable native search
+                    sparse_embeddings.append(item.sparse_weights)
+                else:
+                    meta["sparse_weights"] = json.dumps(
+                        item.sparse_weights, separators=(",", ":")
+                    )
+            elif is_native_sparse:
+                sparse_embeddings.append({})
+
+            dense_embeddings.append(item.embedding)
             metadatas.append(meta)
+
+        if is_native_sparse:
+            final_embeddings = {
+                "#embedding": dense_embeddings,
+                "sparse_embedding": sparse_embeddings,
+            }
+        else:
+            final_embeddings = dense_embeddings
 
         await asyncio.to_thread(
             self.chroma.upsert,
             ids=[item.chunk_id for item in payloads],
-            embeddings=[item.embedding for item in payloads],
+            embeddings=final_embeddings,
             documents=[item.content for item in payloads],
             metadatas=metadatas,
         )

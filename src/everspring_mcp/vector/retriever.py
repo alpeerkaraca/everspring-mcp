@@ -197,129 +197,94 @@ class HybridRetriever:
         where: dict[str, Any] | None,
         deduplicate_urls: bool,
     ) -> list[SearchResult]:
-        """BGE-M3 Native Hybrid Search."""
+        """BGE-M3 Native Hybrid Search using Chroma's RRF and Search API."""
+        from chromadb import K, Knn, Rrf, Search
+
         query_outputs = await self._embedder.embed_texts([query])
         query_dense = query_outputs[0]["dense"]
         query_sparse = query_outputs[0]["sparse"]
 
-        # 1. Fetch dense candidates
-        query_func = partial(
-            self._chroma.query,
-            query_embeddings=[query_dense],
-            n_results=fetch_k,
-            where=where,
+        # 1. Build Native Search Expression
+        # Base dense ranking
+        dense_rank = Knn(
+            query=query_dense, key="#embedding", return_rank=True, limit=fetch_k
         )
-        raw_results = await asyncio.to_thread(query_func)
 
-        if not raw_results["ids"] or not raw_results["ids"][0]:
+        if query_sparse:
+            # Native sparse ranking using the BGE-M3 generated sparse weights
+            sparse_rank = Knn(
+                query=query_sparse,
+                key="sparse_embedding",
+                return_rank=True,
+                limit=fetch_k,
+            )
+            # Combine using RRF
+            ranking = Rrf(
+                ranks=[dense_rank, sparse_rank],
+                weights=[self.dense_weight, self.sparse_weight],
+                k=self.RRF_K,
+            )
+        else:
+            logger.warning(
+                "No sparse weights produced for query. Falling back to dense-only native search."
+            )
+            ranking = dense_rank
+
+        # 2. Build and execute Search
+        # We fetch more candidates if deduplicating to ensure we hit top_k unique URLs
+        search = (
+            Search()
+            .rank(ranking)
+            .limit(top_k * 3 if deduplicate_urls else top_k)
+            .select(K.DOCUMENT, K.SCORE, K.METADATA)
+        )
+
+        if where:
+            search = search.where(where)
+
+        raw_results = await asyncio.to_thread(self._chroma.search, search)
+
+        # 3. Process Native Results
+        results: list[SearchResult] = []
+        seen_urls: set[str] = set()
+
+        # Chroma search returns a SearchQueryResult. .rows() provides list of row lists.
+        try:
+            rows = raw_results.rows()[0]
+        except (IndexError, AttributeError):
             return []
 
-        # 2. Optimized re-ranking via RRF in a separate thread
-        def _rerank_task() -> list[SearchResult]:
-            docs = []
-            for i, doc_id in enumerate(raw_results["ids"][0]):
-                meta = (
-                    raw_results["metadatas"][0][i] if raw_results["metadatas"] else {}
+        for row in rows:
+            meta = row["metadata"] or {}
+            url = str(meta.get("url", "")).strip()
+
+            if deduplicate_urls and url:
+                if url in seen_urls:
+                    continue
+                seen_urls.add(url)
+
+            results.append(
+                SearchResult(
+                    id=row["id"],
+                    content=row["document"] or "",
+                    title=meta.get("title", ""),
+                    url=url,
+                    module=meta.get("module", ""),
+                    submodule=meta.get("submodule") or None,
+                    version_major=meta.get("version_major", 0),
+                    version_minor=meta.get("version_minor", 0),
+                    score=row["score"],
+                    # Native RRF doesn't expose component ranks in the row dict easily
+                    dense_rank=None,
+                    sparse_rank=None,
+                    section_path=meta.get("section_path", ""),
+                    has_code=meta.get("has_code", False),
                 )
-                content = (
-                    raw_results["documents"][0][i] if raw_results["documents"] else ""
-                )
-                distance = (
-                    raw_results["distances"][0][i] if raw_results["distances"] else 0
-                )
+            )
+            if len(results) >= top_k:
+                break
 
-                # Dense score from distance
-                dense_score = 1.0 / (1.0 + max(float(distance), 0.0))
-
-                # Sparse score from dot product
-                sparse_score = 0.0
-                if query_sparse and "sparse_weights" in meta:
-                    try:
-                        doc_sparse = json.loads(meta["sparse_weights"])
-                        # Fast dot product calculation
-                        sparse_score = sum(
-                            query_sparse.get(k, 0.0) * v for k, v in doc_sparse.items()
-                        )
-                    except json.JSONDecodeError:
-                        logger.warning(
-                            f"Corrupted sparse_weights metadata in chunk {doc_id}"
-                        )
-                    except Exception as e:
-                        logger.error(
-                            f"Error calculating sparse score for chunk {doc_id}: {e}"
-                        )
-
-                docs.append(
-                    {
-                        "id": doc_id,
-                        "content": content,
-                        "metadata": meta,
-                        "dense_score": dense_score,
-                        "sparse_score": sparse_score,
-                    }
-                )
-
-            # Calculate Dense Ranks
-            docs.sort(key=lambda x: x["dense_score"], reverse=True)
-            for rank, d in enumerate(docs, 1):
-                d["dense_rank"] = rank
-
-            # Calculate Sparse Ranks
-            docs.sort(key=lambda x: x["sparse_score"], reverse=True)
-            for rank, d in enumerate(docs, 1):
-                d["sparse_rank"] = rank
-
-            # Compute RRF
-            final_results: list[SearchResult] = []
-            seen_urls: set[str] = set()
-
-            # Sort by fused RRF score
-            for d in docs:
-                dense_rrf = 1.0 / (self.RRF_K + d["dense_rank"])
-                # Only apply sparse RRF if there was a positive overlap
-                sparse_rrf = (
-                    1.0 / (self.RRF_K + d["sparse_rank"])
-                    if d["sparse_score"] > 0
-                    else 0
-                )
-                d["rrf_score"] = (self.dense_weight * dense_rrf) + (
-                    self.sparse_weight * sparse_rrf
-                )
-
-            docs.sort(key=lambda x: x["rrf_score"], reverse=True)
-
-            for d in docs:
-                meta = d["metadata"]
-                url = str(meta.get("url", "")).strip()
-
-                if deduplicate_urls and url:
-                    if url in seen_urls:
-                        continue
-                    seen_urls.add(url)
-
-                final_results.append(
-                    SearchResult(
-                        id=d["id"],
-                        content=d["content"],
-                        title=meta.get("title", ""),
-                        url=url,
-                        module=meta.get("module", ""),
-                        submodule=meta.get("submodule") or None,
-                        version_major=meta.get("version_major", 0),
-                        version_minor=meta.get("version_minor", 0),
-                        score=d["rrf_score"],
-                        dense_rank=d["dense_rank"],
-                        sparse_rank=d["sparse_rank"] if d["sparse_score"] > 0 else None,
-                        section_path=meta.get("section_path", ""),
-                        has_code=meta.get("has_code", False),
-                    )
-                )
-                if len(final_results) >= top_k:
-                    break
-
-            return final_results
-
-        return await asyncio.to_thread(_rerank_task)
+        return results
 
     async def _dense_search(
         self,

@@ -10,6 +10,7 @@ from chromadb.api.models.Collection import Collection
 
 from everspring_mcp.utils.logging import get_logger
 from everspring_mcp.vector.config import VectorConfig
+from everspring_mcp.vector.embeddings import MAIN_TIER
 
 logger = get_logger("vector.chroma")
 
@@ -27,15 +28,30 @@ class ChromaClient:
     def get_collection(self) -> Collection:
         if self._collection is None:
             logger.debug(f"Getting collection: {self.config.collection_name}")
+            
+            schema = None
+            if self.config.embedding_tier == MAIN_TIER:
+                from chromadb import Schema, SparseVectorIndexConfig, K
+                schema = Schema()
+                # We define a sparse index on the "sparse_embedding" key.
+                # source_key=K.DOCUMENT means it can be auto-generated from document text,
+                # but we will also support manual upserts of sparse vectors.
+                schema.create_index(
+                    SparseVectorIndexConfig(source_key=K.DOCUMENT),
+                    key="sparse_embedding"
+                )
+                logger.info(f"Using native sparse schema for tier: {self.config.embedding_tier}")
+
             self._collection = self._client.get_or_create_collection(
                 name=self.config.collection_name,
+                schema=schema
             )
         return self._collection
 
     def upsert(
         self,
         ids: list[str],
-        embeddings: list[list[float]],
+        embeddings: list[list[float]] | dict[str, list[Any]],
         documents: list[str],
         metadatas: list[dict[str, Any]],
     ) -> None:
@@ -60,6 +76,16 @@ class ChromaClient:
             n_results=n_results,
             where=where,
         )
+
+    def search(self, search_obj: Any) -> Any:
+        """Execute a search using the new Search API (available with schema)."""
+        collection = self.get_collection()
+        if not hasattr(collection, "search"):
+            raise RuntimeError(
+                f"Collection '{self.config.collection_name}' does not support search API. "
+                "Ensure it was created with a Schema."
+            )
+        return collection.search(search_obj)
 
     def delete(
         self,
