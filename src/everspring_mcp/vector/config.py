@@ -107,6 +107,10 @@ class VectorConfig(BaseModel):
         ge=0,
         description="Token overlap between chunks",
     )
+    exclude_patterns: list[str] = Field(
+        default_factory=list,
+        description="Glob patterns for noisy files to hard-exclude from indexing",
+    )
     batch_size: int = Field(
         default=128,
         ge=1,

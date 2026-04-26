@@ -45,6 +45,8 @@ async def _run_index(args: argparse.Namespace) -> int:
         updates["chunk_workers"] = args.chunk_workers
     if args.upsert_batch_size is not None:
         updates["chroma_upsert_batch_size"] = args.upsert_batch_size
+    if hasattr(args, "exclude") and args.exclude is not None:
+        updates["exclude_patterns"] = args.exclude
     if updates:
         config = config.model_copy(update=updates)
 
@@ -96,7 +98,12 @@ async def _run_index(args: argparse.Namespace) -> int:
             deleted_vectors = max(0, before_delete - after_delete)
 
     async with VectorIndexer(config=config) as indexer:
-        stats = await indexer.index_unindexed(limit=args.limit)
+        if getattr(args, "all", False):
+            # Calculate total number of documents in DB to override limit
+            limit = await indexer._storage.documents.count()
+        else:
+            limit = args.limit
+        stats = await indexer.index_unindexed(limit=limit)
 
     bm25_index_built = False
     if args.build_bm25 and config.embedding_tier != "main":
@@ -249,6 +256,24 @@ def add_subparser(subparsers: argparse._SubParsersAction) -> None:
         "--build-bm25",
         action="store_true",
         help="Build BM25 index after vector indexing",
+    )
+    index.add_argument(
+        "--exclude",
+        nargs="*",
+        default=[
+            "**/index-all.html",
+            "**/allclasses-*.html",
+            "**/allpackages-index.html",
+            "**/*-tree.html",
+            "**/deprecated-list.html",
+            "**/constant-values.html",
+            "**/serialized-form.html",
+            "**/help-doc.html",
+            "**/overview-summary.html",
+            "**/search.js",
+            "**/search-index.js",
+        ],
+        help="Glob patterns to hard-exclude from indexing",
     )
     index.add_argument(
         "--module", default=None, help="Module filter for --reindex (e.g., spring-boot)"

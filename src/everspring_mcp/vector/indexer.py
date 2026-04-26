@@ -351,10 +351,21 @@ class VectorIndexer:
                 async def _producer() -> None:
                     docs_iter = iter(docs)
                     active_tasks: set[asyncio.Future[_PreparedDocument | None]] = set()
+                    excluded_files = 0
 
                     def _schedule_next() -> bool:
+                        nonlocal excluded_files
                         try:
-                            next_doc = next(docs_iter)
+                            while True:
+                                next_doc = next(docs_iter)
+                                if self.config.exclude_patterns:
+                                    import fnmatch
+                                    # Match against the original URL which retains the recognizable filename structure
+                                    match_target = str(next_doc.url) if next_doc.url else str(next_doc.file_path)
+                                    if any(fnmatch.fnmatch(match_target, pat) for pat in self.config.exclude_patterns):
+                                        excluded_files += 1
+                                        continue
+                                break
                         except StopIteration:
                             return False
                         task_data = _DocumentTask(
