@@ -401,10 +401,12 @@ class VectorIndexer:
                         for task in done:
                             active_tasks.remove(task)
                             prepared = task.result()
-                            docs_bar.update(1)
+                            if progress_enabled:
+                                docs_bar.update(1)
                             if prepared is not None and prepared.chunks:
                                 await prepared_queue.put(prepared)
-                            _schedule_next()
+                    if excluded_files > 0:
+                        logger.info("Excluded %d files based on patterns", excluded_files)
 
                     await prepared_queue.put(None)
 
