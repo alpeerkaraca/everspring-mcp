@@ -264,6 +264,7 @@ class SyncOrchestrator:
                 markdown_downloads.append(download)
 
             # Process markdown downloads
+            docs_to_upsert = []
             for i, download in enumerate(markdown_downloads):
                 await self._report_progress(
                     f"Processing {download.s3_key}",
@@ -276,16 +277,20 @@ class SyncOrchestrator:
                         self._relative_path(download.s3_key, module, version, submodule)
                     )
                     metadata = metadata_cache.get(url_hash)
-                    await self._process_downloaded_file(
+                    doc = await self._process_downloaded_file(
                         download,
                         module,
                         version,
                         metadata,
                         submodule=submodule,
                     )
+                    docs_to_upsert.append(doc)
                     result.bytes_downloaded += download.size_bytes
                 else:
                     result.errors.append(download.error or f"Failed: {download.s3_key}")
+            
+            if docs_to_upsert:
+                await self.storage.documents.upsert_many(docs_to_upsert)
 
             # Count results (only markdown files)
             result.files_added = sum(
@@ -403,7 +408,7 @@ class SyncOrchestrator:
         version: str,
         metadata: dict | None,
         submodule: str | None = None,
-    ) -> None:
+    ) -> DocumentRecord:
         """Process a successfully downloaded file.
 
         Args:
@@ -411,6 +416,9 @@ class SyncOrchestrator:
             module: Spring module
             version: Version string
             metadata: Optional metadata JSON for this document
+
+        Returns:
+            Created document record
         """
         # Parse version parts
         parts = version.split(".")
@@ -445,7 +453,7 @@ class SyncOrchestrator:
         doc_id = url_hash or compute_hash(download.s3_key)[:16]
 
         # Create/update document record
-        doc = DocumentRecord(
+        return DocumentRecord(
             id=doc_id,
             url=source_url or f"s3://{self.config.s3_bucket}/{download.s3_key}",
             title=title,
@@ -463,8 +471,6 @@ class SyncOrchestrator:
             schema_version="1.0.0",
             is_indexed=False,  # Will be indexed by ChromaDB later
         )
-
-        await self.storage.documents.upsert(doc)
 
     async def _extract_title(self, file_path: Path) -> str:
         """Extract title from markdown file.

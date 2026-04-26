@@ -320,6 +320,45 @@ class DocumentRepository:
         )
         await self.upsert(doc)
 
+    async def save_many(
+        self, pages: list[ScrapedPage], s3_key: str = "", file_path: str = ""
+    ) -> None:
+        """Convert multiple ScrapedPages to DocumentRecords and upsert in batch.
+
+        Args:
+            pages: List of scraped pages
+            s3_key: Optional S3 key (used if one key applies to all, rare)
+            file_path: Optional local file path
+        """
+        if not pages:
+            return
+
+        from everspring_mcp.models.base import compute_hash
+
+        docs = []
+        for page in pages:
+            doc = DocumentRecord(
+                id=compute_hash(str(page.url)),
+                url=str(page.url),
+                title=page.title,
+                module=page.module.value,
+                submodule=page.submodule,
+                major_version=page.version.major,
+                minor_version=page.version.minor,
+                patch_version=page.version.patch,
+                content_hash=page.content_hash,
+                file_path=file_path or s3_key,  # Fallback
+                s3_key=s3_key,
+                size_bytes=len(page.markdown_content.encode("utf-8")),
+                scraped_at=page.scraped_at,
+                synced_at=datetime.now(UTC),
+                schema_version="1.0",
+                is_indexed=False,
+            )
+            docs.append(doc)
+
+        await self.upsert_many(docs)
+
     async def get_by_id(self, doc_id: str) -> DocumentRecord | None:
         """Get document by ID.
 
