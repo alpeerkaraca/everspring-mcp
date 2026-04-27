@@ -197,26 +197,35 @@ class HybridRetriever:
         where: dict[str, Any] | None,
         deduplicate_urls: bool,
     ) -> list[SearchResult]:
-        """BGE-M3 Native Hybrid Search."""
+        """BGE-M3 Native Hybrid Search with NumPy-optimized re-ranking."""
+        import numpy as np
+
         query_outputs = await self._embedder.embed_texts([query])
         query_dense = query_outputs[0]["dense"]
-        query_sparse = query_outputs[0]["sparse"]
+        query_sparse = query_outputs[0]["sparse"] or {}
 
-        # 1. Fetch dense candidates
-        query_func = partial(
+        # 1. Fetch dense candidates via legacy query API
+        raw_results = await asyncio.to_thread(
             self._chroma.query,
             query_embeddings=[query_dense],
             n_results=fetch_k,
             where=where,
         )
-        raw_results = await asyncio.to_thread(query_func)
 
         if not raw_results["ids"] or not raw_results["ids"][0]:
             return []
 
-        # 2. Optimized re-ranking via RRF in a separate thread
+        # 2. Optimized re-ranking using NumPy
         def _rerank_task() -> list[SearchResult]:
             docs = []
+            
+            # Pre-extract query sparse data for vectorized matching
+            if query_sparse:
+                q_keys = list(query_sparse.keys())
+                q_vals = np.array(list(query_sparse.values()), dtype=np.float32)
+            else:
+                q_keys, q_vals = [], np.array([], dtype=np.float32)
+
             for i, doc_id in enumerate(raw_results["ids"][0]):
                 meta = (
                     raw_results["metadatas"][0][i] if raw_results["metadatas"] else {}
@@ -228,26 +237,19 @@ class HybridRetriever:
                     raw_results["distances"][0][i] if raw_results["distances"] else 0
                 )
 
-                # Dense score from distance
+                # Dense score from distance (cosine similarity)
                 dense_score = 1.0 / (1.0 + max(float(distance), 0.0))
 
-                # Sparse score from dot product
+                # Sparse score from dot product (NumPy optimized)
                 sparse_score = 0.0
-                if query_sparse and "sparse_weights" in meta:
+                if q_keys and "sparse_weights" in meta:
                     try:
                         doc_sparse = json.loads(meta["sparse_weights"])
-                        # Fast dot product calculation
-                        sparse_score = sum(
-                            query_sparse.get(k, 0.0) * v for k, v in doc_sparse.items()
-                        )
-                    except json.JSONDecodeError:
-                        logger.warning(
-                            f"Corrupted sparse_weights metadata in chunk {doc_id}"
-                        )
-                    except Exception as e:
-                        logger.error(
-                            f"Error calculating sparse score for chunk {doc_id}: {e}"
-                        )
+                        # Vectorized intersection: extract values for keys present in query
+                        d_vals = np.array([doc_sparse.get(k, 0.0) for k in q_keys], dtype=np.float32)
+                        sparse_score = float(np.dot(q_vals, d_vals))
+                    except (json.JSONDecodeError, TypeError):
+                        pass
 
                 docs.append(
                     {
@@ -269,14 +271,13 @@ class HybridRetriever:
             for rank, d in enumerate(docs, 1):
                 d["sparse_rank"] = rank
 
-            # Compute RRF
+            # Compute RRF Fusion
             final_results: list[SearchResult] = []
             seen_urls: set[str] = set()
 
-            # Sort by fused RRF score
             for d in docs:
                 dense_rrf = 1.0 / (self.RRF_K + d["dense_rank"])
-                # Only apply sparse RRF if there was a positive overlap
+                # Apply sparse RRF only if there was lexical overlap
                 sparse_rrf = (
                     1.0 / (self.RRF_K + d["sparse_rank"])
                     if d["sparse_score"] > 0
@@ -286,6 +287,7 @@ class HybridRetriever:
                     self.sparse_weight * sparse_rrf
                 )
 
+            # Final sort by fused score
             docs.sort(key=lambda x: x["rrf_score"], reverse=True)
 
             for d in docs:

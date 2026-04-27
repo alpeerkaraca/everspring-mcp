@@ -10,6 +10,7 @@ from chromadb.api.models.Collection import Collection
 
 from everspring_mcp.utils.logging import get_logger
 from everspring_mcp.vector.config import VectorConfig
+from everspring_mcp.vector.embeddings import MAIN_TIER
 
 logger = get_logger("vector.chroma")
 
@@ -40,7 +41,7 @@ class ChromaClient:
         metadatas: list[dict[str, Any]],
     ) -> None:
         collection = self.get_collection()
-        # logger.debug(f"Upserting {len(ids)} vectors")
+        logger.debug(f"Upserting {len(ids)} vectors")
         collection.upsert(
             ids=ids,
             embeddings=embeddings,
@@ -59,6 +60,22 @@ class ChromaClient:
             query_embeddings=query_embeddings,
             n_results=n_results,
             where=where,
+        )
+
+    def search(self, search_obj: Any) -> Any:
+        """Compatibility wrapper for the Search API (not available in local).
+        Attempts to translate search objects back to legacy query calls if possible,
+        but primarily intended to be bypassed by the retriever using query() directly.
+        """
+        # For now, we will revert the retriever to call query() or search() as a wrapper
+        # if the search_obj has query_embeddings, n_results, etc.
+        # But a cleaner approach is for retriever to use .query() directly.
+        # Here we just implement a barebones wrapper or raise if not easily translatable.
+        logger.warning("Search API called on local Chroma client. Falling back to query API.")
+        return self.query(
+            query_embeddings=search_obj.get("query_embeddings", []),
+            n_results=search_obj.get("n_results", 5),
+            where=search_obj.get("where"),
         )
 
     def delete(
