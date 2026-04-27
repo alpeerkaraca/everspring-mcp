@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, TypeAlias
@@ -51,6 +52,7 @@ class EmbeddingStrategy(ABC):
     def __init__(self, model_name: str) -> None:
         self.model_name = model_name
         self._model: SentenceTransformer | None = None
+        self._load_lock = threading.Lock()
 
     @abstractmethod
     async def embed(self, texts: list[str], batch_size: int) -> list[dict[str, Any]]:
@@ -80,24 +82,26 @@ class EmbeddingStrategy(ABC):
 
     def _ensure_loaded(self) -> SentenceTransformer:
         if self._model is None:
-            from sentence_transformers import SentenceTransformer
+            with self._load_lock:
+                if self._model is None:
+                    from sentence_transformers import SentenceTransformer
 
-            device, dtype = self._resolve_device_and_dtype()
-            logger.info("Loading %s model: %s", self.tier_name, self.model_name)
-            try:
-                self._model = SentenceTransformer(
-                    self.model_name,
-                    device=device,
-                    model_kwargs={"dtype": dtype},
-                    processor_kwargs={"use_fast": True},
-                )
-            except TypeError:
-                self._model = SentenceTransformer(
-                    self.model_name,
-                    device=device,
-                    model_kwargs={"dtype": dtype},
-                    tokenizer_kwargs={"use_fast": True},
-                )
+                    device, dtype = self._resolve_device_and_dtype()
+                    logger.info("Loading %s model: %s", self.tier_name, self.model_name)
+                    try:
+                        self._model = SentenceTransformer(
+                            self.model_name,
+                            device=device,
+                            model_kwargs={"dtype": dtype},
+                            processor_kwargs={"use_fast": True},
+                        )
+                    except TypeError:
+                        self._model = SentenceTransformer(
+                            self.model_name,
+                            device=device,
+                            model_kwargs={"dtype": dtype},
+                            tokenizer_kwargs={"use_fast": True},
+                        )
         return self._model
 
 
@@ -110,32 +114,34 @@ class BGEM3Strategy(EmbeddingStrategy):
 
     def _ensure_loaded(self):
         if self._model is None:
-            import torch
-            device, dtype = self._resolve_device_and_dtype()
-            logger.info("Loading %s model: %s", self.tier_name, self.model_name)
-            try:
-                from FlagEmbedding import BGEM3FlagModel
-                use_fp16 = dtype != torch.float32
-                self._model = BGEM3FlagModel(self.model_name, use_fp16=use_fp16, device=device)
-                self._is_flag_model = True
-            except ImportError:
-                logger.warning("FlagEmbedding not installed. Falling back to SentenceTransformer. Sparse embeddings disabled.")
-                from sentence_transformers import SentenceTransformer
-                self._is_flag_model = False
-                try:
-                    self._model = SentenceTransformer(
-                        self.model_name,
-                        device=device,
-                        model_kwargs={"dtype": dtype},
-                        processor_kwargs={"use_fast": True},
-                    )
-                except TypeError:
-                    self._model = SentenceTransformer(
-                        self.model_name,
-                        device=device,
-                        model_kwargs={"dtype": dtype},
-                        tokenizer_kwargs={"use_fast": True},
-                    )
+            with self._load_lock:
+                if self._model is None:
+                    import torch
+                    device, dtype = self._resolve_device_and_dtype()
+                    logger.info("Loading %s model: %s", self.tier_name, self.model_name)
+                    try:
+                        from FlagEmbedding import BGEM3FlagModel
+                        use_fp16 = dtype != torch.float32
+                        self._model = BGEM3FlagModel(self.model_name, use_fp16=use_fp16, device=device)
+                        self._is_flag_model = True
+                    except ImportError:
+                        logger.warning("FlagEmbedding not installed. Falling back to SentenceTransformer. Sparse embeddings disabled.")
+                        from sentence_transformers import SentenceTransformer
+                        self._is_flag_model = False
+                        try:
+                            self._model = SentenceTransformer(
+                                self.model_name,
+                                device=device,
+                                model_kwargs={"dtype": dtype},
+                                processor_kwargs={"use_fast": True},
+                            )
+                        except TypeError:
+                            self._model = SentenceTransformer(
+                                self.model_name,
+                                device=device,
+                                model_kwargs={"dtype": dtype},
+                                tokenizer_kwargs={"use_fast": True},
+                            )
         return self._model
 
     async def embed(self, texts: list[str], batch_size: int) -> list[dict[str, Any]]:

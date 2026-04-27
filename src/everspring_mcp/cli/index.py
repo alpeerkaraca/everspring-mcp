@@ -24,10 +24,12 @@ from everspring_mcp.cli.utils import (
 
 logger = logging.getLogger("everspring_mcp")
 
+
 async def _run_index(args: argparse.Namespace) -> int:
     if args.submodule and not args.module:
         raise SystemExit("--submodule requires --module for index --reindex")
 
+    logger.debug("Resolving vector config...")
     config = await resolve_vector_config(args)
     updates: dict[str, Any] = {}
     default_chunk_size, default_overlap = chunk_defaults_for_tier(config.embedding_tier)
@@ -54,20 +56,25 @@ async def _run_index(args: argparse.Namespace) -> int:
     deleted_vectors = 0
     logger.info(f"Starting indexing with config: {config.model_dump_json(indent=2)}")
     if args.reindex:
+        logger.debug(f"Initializing StorageManager for reindex: db_path={config.db_path}")
         storage = StorageManager(config.db_path)
+        logger.debug("Connecting to storage...")
         await storage.connect()
         try:
             module_filter = args.module
             major_filter = args.version
             submodule_filter = args.submodule if module_filter else None
+            logger.debug(f"Resetting indexed docs: module={module_filter}, major={major_filter}, submodule={submodule_filter}")
             reset_count = await storage.documents.reset_indexed(
                 module=module_filter,
                 major=major_filter,
                 submodule=submodule_filter,
             )
         finally:
+            logger.debug("Closing storage connection...")
             await storage.close()
 
+        logger.debug(f"Initializing ChromaClient for reindex: tier={config.embedding_tier}")
         chroma = ChromaClient(config)
         where_conditions: list[dict[str, Any]] = []
         if args.module:
@@ -88,25 +95,31 @@ async def _run_index(args: argparse.Namespace) -> int:
             where_filter = {"$and": where_conditions}
 
         if where_filter is None:
+            logger.debug("Resetting full Chroma collection...")
             before_delete = chroma.count()
             chroma.reset_collection()
             deleted_vectors = before_delete
         else:
+            logger.debug(f"Deleting from Chroma with filter: {where_filter}")
             before_delete = chroma.count()
             chroma.delete(where=where_filter)
             after_delete = chroma.count()
             deleted_vectors = max(0, before_delete - after_delete)
 
+    logger.debug("Initializing VectorIndexer...")
     async with VectorIndexer(config=config) as indexer:
         if getattr(args, "all", False):
+            logger.debug("Calculating total unindexed documents...")
             # Calculate total number of documents in DB to override limit
             limit = await indexer._storage.documents.count()
         else:
             limit = args.limit
+        logger.debug(f"Starting indexing loop: limit={limit}")
         stats = await indexer.index_unindexed(limit=limit)
 
     bm25_index_built = False
     if args.build_bm25 and config.embedding_tier != "main":
+        logger.debug(f"Building BM25 index for tier={config.embedding_tier}")
         retriever = HybridRetriever(config=config)
         retriever.build_bm25_index()
         bm25_index_built = True
@@ -121,9 +134,9 @@ async def _run_index(args: argparse.Namespace) -> int:
         "documents_reset": reset_count,
         "vectors_deleted": deleted_vectors,
         "bm25_index_built": bm25_index_built,
-        "bm25_index_path": str(config.data_dir / "bm25_index.pkl")
-        if bm25_index_built
-        else None,
+        "bm25_index_path": (
+            str(config.data_dir / "bm25_index.pkl") if bm25_index_built else None
+        ),
     }
     if args.json:
         logger.info(json.dumps(payload, indent=2))
@@ -139,16 +152,22 @@ async def _run_index(args: argparse.Namespace) -> int:
 
 
 async def _run_search(args: argparse.Namespace) -> int:
+    logger.debug("Resolving vector config...")
     config = await resolve_vector_config(args)
+    logger.debug(f"Initializing HybridRetriever: tier={config.embedding_tier}")
     retriever = HybridRetriever(config=config)
 
     if config.embedding_tier != "main" and (
         args.build_index or not retriever.ensure_bm25_index()
     ):
-        logger.info("Building BM25 index...")
+        logger.debug("BM25 index missing or rebuild requested. Building...")
         retriever.build_bm25_index()
 
     try:
+        logger.debug(
+            f"Executing hybrid search: query='{args.query}', top_k={args.top_k}, "
+            f"module={args.module}, version={args.version}"
+        )
         results = await retriever.search(
             query=args.query,
             top_k=args.top_k,
@@ -170,6 +189,7 @@ async def _run_search(args: argparse.Namespace) -> int:
         raise
 
     if getattr(args, "prompt", False):
+        logger.debug("Building LLM prompt context...")
         builder = (
             PromptBuilder()
             .add_user_query(args.query)
@@ -196,6 +216,7 @@ async def _run_search(args: argparse.Namespace) -> int:
         ]
         logger.info(json.dumps(output, indent=2))
     else:
+        logger.debug("Rendering search results to console...")
         _render_search_results(results)
 
     return 0
@@ -208,6 +229,11 @@ def add_subparser(subparsers: argparse._SubParsersAction) -> None:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     index.add_argument("--limit", type=int, default=50, help="Max documents to index")
+    index.add_argument(
+        "--all",
+        action="store_true",
+        help="Index all unindexed documents (ignores --limit)",
+    )
     index.add_argument("--data-dir", default=None, help="Local data directory override")
     index.add_argument(
         "--db-filename", default=None, help="SQLite database filename override"

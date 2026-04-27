@@ -347,7 +347,8 @@ class SyncDelta(TimestampedModel):
 
         # Find added and modified files
         for path, new_hash in new_files.items():
-            new_entry = next(f for f in new_manifest.files if f.path == path)
+            new_file_index = {f.path: f for f in new_manifest.files}
+            new_entry = new_file_index[path]
             if path not in old_files:
                 changes.append(FileChange(
                     path=path,

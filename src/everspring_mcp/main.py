@@ -12,7 +12,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 from dotenv import load_dotenv
+
+# Disable tokenizer parallelism globally to prevent deadlocks in async/worker loops
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 from everspring_mcp.cli import scrape, sync, ingest, index, mcp, model_cache
 

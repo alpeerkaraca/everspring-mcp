@@ -145,16 +145,25 @@ def _prepare_document_worker(
         return None
 
     markdown_path = _resolve_markdown_path(Path(docs_dir), relative_path)
-    if markdown_path is None or not markdown_path.exists():
+    metadata_path = _metadata_path_for(markdown_path) if markdown_path else None
+    metadata = _load_metadata(metadata_path) if metadata_path else {}
+
+    content = None
+    if markdown_path and markdown_path.exists():
+        content = markdown_path.read_text(encoding="utf-8")
+    elif metadata.get("markdown_content"):
+        content = metadata["markdown_content"]
+
+    if not content:
+        # Only log if it's not a known excluded pattern (which are handled in producer)
+        # but here we are in worker, we don't have easy access to config.exclude_patterns
+        # and we don't want to spam. But if it's missing, it's a "silent skip".
         return None
 
-    metadata_path = _metadata_path_for(markdown_path)
-    metadata = _load_metadata(metadata_path)
-    source_url = metadata.get("url") if metadata else None
+    source_url = metadata.get("url")
     if not source_url or not str(source_url).startswith("http"):
         return None
 
-    content = markdown_path.read_text(encoding="utf-8")
     chunks = _worker_chunker(model_name, max_tokens, overlap_tokens).chunk(content)
     if not chunks:
         return None
@@ -364,6 +373,8 @@ class VectorIndexer:
                                     match_target = str(next_doc.url) if next_doc.url else str(next_doc.file_path)
                                     if any(fnmatch.fnmatch(match_target, pat) for pat in self.config.exclude_patterns):
                                         excluded_files += 1
+                                        if progress_enabled:
+                                            docs_bar.update(1)
                                         continue
                                 break
                         except StopIteration:
@@ -405,6 +416,8 @@ class VectorIndexer:
                                 docs_bar.update(1)
                             if prepared is not None and prepared.chunks:
                                 await prepared_queue.put(prepared)
+                            # Schedule next available document to keep workers busy
+                            _schedule_next()
                     if excluded_files > 0:
                         logger.info("Excluded %d files based on patterns", excluded_files)
 
@@ -527,11 +540,11 @@ class VectorIndexer:
             dense = vectors[i]["dense"]
             sparse = vectors[i]["sparse"]
 
-            # Metadata Size Protection: Top 150 tokens
+            # Metadata Size Protection: Top 300 tokens
             top_sparse = None
             if sparse:
                 top_sparse = dict(
-                    sorted(sparse.items(), key=lambda x: x[1], reverse=True)[:150]
+                    sorted(sparse.items(), key=lambda x: x[1], reverse=True)[:300]
                 )
 
             payloads.append(
@@ -609,7 +622,7 @@ class VectorIndexer:
         texts: list[str],
         progress_bar: Any | None = None,
     ) -> list[dict[str, Any]]:
-        logger.info("Embedding batch of %d texts", len(texts))
+        # logger.info("Embedding batch of %d texts", len(texts))
         vectors = await self.embedder.embed_texts(texts)
         if progress_bar is not None:
             progress_bar.update(len(texts))
