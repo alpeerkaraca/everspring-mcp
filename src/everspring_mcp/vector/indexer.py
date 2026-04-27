@@ -540,12 +540,12 @@ class VectorIndexer:
             dense = vectors[i]["dense"]
             sparse = vectors[i]["sparse"]
 
-            # PERFORMANCE OPTIMIZATION: Top 150 tokens for local RTX 5090 execution.
+            #  300 tokens for local execution.
             # Minimizes SQLite metadata bloat and JSON parsing overhead.
             top_sparse = None
             if sparse:
                 top_sparse = dict(
-                    sorted(sparse.items(), key=lambda x: x[1], reverse=True)[:150]
+                    sorted(sparse.items(), key=lambda x: x[1], reverse=True)[:300]
                 )
 
             payloads.append(
@@ -570,16 +570,28 @@ class VectorIndexer:
         if not payloads:
             return 0, 0
 
+        logger.debug("Starting _flush_vector_payloads for %d items...", len(payloads))
         # Safe Metadata Storage: Serialize sparse weights for local execution
         metadatas = []
-        for item in payloads:
+        for i, item in enumerate(payloads):
+            if i % 100 == 0:
+                logger.debug("Processing metadata item %d/%d...", i, len(payloads))
+                # Yield control to the event loop to prevent blocking during heavy serialization
+                await asyncio.sleep(0)
+            
             meta = item.metadata.copy()
             if item.sparse_weights:
-                meta["sparse_weights"] = json.dumps(
+                json_str = json.dumps(
                     item.sparse_weights, separators=(",", ":")
                 )
+                meta["sparse_weights"] = json_str
+                if i == 0:
+                    logger.debug("Sample sparse_weights JSON size: %d bytes", len(json_str))
             metadatas.append(meta)
 
+        logger.debug("Metadata loop complete. Metadatas list has %d items.", len(metadatas))
+        
+        logger.debug("Preparing to call asyncio.to_thread for chroma.upsert...")
         await asyncio.to_thread(
             self.chroma.upsert,
             ids=[item.chunk_id for item in payloads],
@@ -587,6 +599,7 @@ class VectorIndexer:
             documents=[item.content for item in payloads],
             metadatas=metadatas,
         )
+        logger.debug("Returned from asyncio.to_thread for chroma.upsert.")
 
         touched_doc_ids: set[str] = set()
         for item in payloads:
@@ -603,6 +616,7 @@ class VectorIndexer:
             and doc_id not in marked_docs
         ]
         if completed_docs:
+            logger.debug("Marking %d documents as indexed in SQLite...", len(completed_docs))
             await self._mark_docs_indexed_batched(completed_docs)
             marked_docs.update(completed_docs)
 
@@ -623,7 +637,7 @@ class VectorIndexer:
         texts: list[str],
         progress_bar: Any | None = None,
     ) -> list[dict[str, Any]]:
-        # logger.info("Embedding batch of %d texts", len(texts))
+        logger.debug("Embedding batch of %d texts", len(texts))
         vectors = await self.embedder.embed_texts(texts)
         if progress_bar is not None:
             progress_bar.update(len(texts))

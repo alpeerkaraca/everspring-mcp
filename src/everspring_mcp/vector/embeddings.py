@@ -160,10 +160,19 @@ class BGEM3Strategy(EmbeddingStrategy):
             dense_vecs = output["dense_vecs"]
             lexical_weights = output["lexical_weights"]
 
-            return [
-                {"dense": d.tolist(), "sparse": s}
-                for d, s in zip(dense_vecs, lexical_weights, strict=True)
-            ]
+            results = []
+            for d, s in zip(dense_vecs, lexical_weights, strict=True):
+                # PERFORMANCE OPTIMIZATION: Prune to Top 150 immediately.
+                # Also convert values to standard Python floats to avoid NumPy serialization hangs in asyncio loop.
+                top_s = dict(
+                    sorted(
+                        [(str(k), float(v)) for k, v in s.items()],
+                        key=lambda x: x[1],
+                        reverse=True
+                    )[:150]
+                )
+                results.append({"dense": d.tolist(), "sparse": top_s})
+            return results
         else:
             import numpy as np
             embeddings = await asyncio.to_thread(

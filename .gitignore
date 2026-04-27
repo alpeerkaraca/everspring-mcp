@@ -86,3 +86,4 @@ gha-creds-*.json
 
 # Gemini Context Files
 PROJECT_CONTEXT.md
+.everspring/

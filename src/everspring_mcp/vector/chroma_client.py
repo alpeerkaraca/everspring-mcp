@@ -41,7 +41,7 @@ class ChromaClient:
         metadatas: list[dict[str, Any]],
     ) -> None:
         collection = self.get_collection()
-        # logger.debug(f"Upserting {len(ids)} vectors")
+        logger.debug(f"Upserting {len(ids)} vectors")
         collection.upsert(
             ids=ids,
             embeddings=embeddings,
